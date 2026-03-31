@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hiveframe"
+version = "0.1.0"
+description = "Transactional, distributed-ready pandas-compatible DataFrame engine."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "polars>=1.0",
+    "pyarrow>=15.0",
+    "msgpack>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+nats = [
+    "nats-py>=2.7",
+]
+quic = [
+    "aioquic>=1.2",
+]
+transport = [
+    "nats-py>=2.7",
+    "aioquic>=1.2",
+]
+benchmark = [
+    "psutil>=5.9"
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.setuptools]
+# Package core/ and agent/ as subpackages of the hiveframe namespace so installed package
+# layout becomes hiveframe, hiveframe.core, hiveframe.agent (no source movement required).
+packages = ["hiveframe", "hiveframe.core", "hiveframe.agent"]
+
+[tool.setuptools.package-dir]
+# Map the hiveframe.* package names to the existing source directories.
+hiveframe = "hiveframe"
+"hiveframe.core" = "core"
+"hiveframe.agent" = "agent"
