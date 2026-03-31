@@ -283,14 +283,38 @@ Partitions are assigned and rebalanced automatically when writer nodes join or f
 | `role` | *(required)* | `"write"` or `"read"` |
 | `region` | `"ap-southeast-1"` | Region label for routing |
 | `host` | `"127.0.0.1"` | Transport bind address |
-| `port` | `19000` | QUIC transport port |
+| `port` | `19000` | Transport port |
 | `nats_url` | `"nats://127.0.0.1:4222"` | NATS server URL (optional) |
 | `enable_cluster` | `False` | Enable transport + registry + heartbeat + global read |
-| `registry_backend` | `"memory"` | `"memory"` or `"nats"` |
-| `transport_backend` | `"memory"` | `"memory"` or `"quic"` |
+| `registry_backend` | `"memory"` | `"memory"`, `"nats"`, or `"sqlite"` |
+| `transport_backend` | `"memory"` | `"memory"`, `"quic"`, or `"tcp"` |
 | `required_cluster` | `False` | Fail on startup if cluster is unavailable |
 | `partition_start` | `0` | Initial partition range start (auto-overridden on rebalance) |
 | `partition_end` | `1000` | Initial partition range end (auto-overridden on rebalance) |
+
+### Registry/Transport Backend Options
+
+- `registry_backend="sqlite"` — zero dependency, persistent registry for dev/homelab/single-machine
+- `registry_backend="nats"` — production-ready, distributed registry (requires NATS)
+- `registry_backend="memory"` — in-memory, for testing/dev only
+- `transport_backend="tcp"` — zero dependency, local network transport (for dev/homelab)
+- `transport_backend="quic"` — production-ready, cross-region, low-latency
+- `transport_backend="memory"` — in-memory, for testing/dev only
+
+#### Example: SQLite registry and TCP transport
+
+```python
+from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig
+
+runtime = ClusterRuntime(RuntimeConfig(
+    node_id="writer-1",
+    role="write",
+    port=19000,
+    enable_cluster=True,
+    registry_backend="sqlite",
+    transport_backend="tcp",
+))
+```
 
 ---
 
@@ -423,8 +447,8 @@ print(metrics)
 
 ### API Improvements
 
-- `DFrame.from_csv()` and `DFrame.from_excel()` for direct file loading (if implemented)
-- `df.describe_for_agent()` for LLM context building (if implemented)
+- `DFrame.from_csv()` and `DFrame.from_excel()` for direct file loading
+- `df.describe_for_agent()` for LLM context building
 
 ---
 

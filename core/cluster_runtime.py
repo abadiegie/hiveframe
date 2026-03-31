@@ -16,9 +16,11 @@ import pandas as pd
 
 from .coordinator import TransactionCoordinator
 from .heartbeat import HeartbeatManager
-from .quic_transport import QuicTransport
-from .registry import ClusterRegistry, NodeInfo
+from .sqlite_registry import SQLiteRegistry
+from .tcp_transport import TCPTransport
 from .replication import ReplicationManager
+from .registry import NodeInfo as MemNodeInfo
+from .sqlite_registry import NodeInfo as SQLiteNodeInfo
 
 
 logger = logging.getLogger("core.cluster_runtime")
@@ -35,8 +37,8 @@ class RuntimeConfig:
     partition_end: int = 1000
     nats_url: str = "nats://127.0.0.1:4222"
     enable_cluster: bool = False
-    registry_backend: str = "memory"
-    transport_backend: str = "memory"
+    registry_backend: str = "memory"  # memory | nats | sqlite
+    transport_backend: str = "memory"  # memory | quic | tcp
     required_cluster: bool = False
 
 
@@ -46,8 +48,31 @@ class ClusterRuntime:
     def __init__(self, config: RuntimeConfig, coordinator: TransactionCoordinator | None = None) -> None:
         self.config = config
         self.coordinator = coordinator or TransactionCoordinator()
-        self.registry = ClusterRegistry(nats_url=config.nats_url)
-        self.transport = QuicTransport(node_id=config.node_id)
+
+        # Registry selection
+        if config.registry_backend == "sqlite":
+            self.registry = SQLiteRegistry()
+            self._NodeInfo = SQLiteNodeInfo
+        elif config.registry_backend == "nats":
+            from .registry import ClusterRegistry
+            self.registry = ClusterRegistry(config.nats_url)
+            self._NodeInfo = MemNodeInfo
+        else:
+            from .registry import ClusterRegistry
+            self.registry = ClusterRegistry("")
+            self._NodeInfo = MemNodeInfo
+
+        # Transport selection
+        if config.transport_backend == "tcp":
+            self.transport = TCPTransport(config.host, config.port)
+            self.transport.start_server()
+        elif config.transport_backend == "quic":
+            from .quic_transport import QuicTransport
+            self.transport = QuicTransport(config.host, config.port)
+            self.transport.start_server()
+        else:
+            self.transport = None  # fallback or in-memory
+
         self.replication = ReplicationManager(
             node_id=config.node_id,
             node_region=config.region,
@@ -111,7 +136,7 @@ class ClusterRuntime:
             logger.info("Registry connected (standalone)")
 
         # Register this node in the registry and log the registration
-        node_info = NodeInfo(
+        node_info = self._NodeInfo(
             node_id=self.config.node_id,
             host=self.config.host,
             port=self.config.port,
@@ -127,7 +152,7 @@ class ClusterRuntime:
         await self.registry.register(node_info)
         logger.info("Node registered: %s (role=%s host=%s port=%s)", node_info.node_id, node_info.role, node_info.host, node_info.port)
 
-    async def _on_registry_event(self, node: "NodeInfo", event: str) -> None:
+    async def _on_registry_event(self, node, event: str) -> None:
         """Broadcast REBALANCE message to all peers when partition map changes."""
         logger.info("Registry event: %s for node %s role=%s", event, getattr(node, 'node_id', None), getattr(node, 'role', None))
         if event not in ("joined", "failed"):
@@ -156,7 +181,7 @@ class ClusterRuntime:
         logger.info("Broadcasting REBALANCE to peers (excluding %s). Partition map entries=%d", self.config.node_id, len(partition_map))
         await self.transport.broadcast(msg, exclude=[self.config.node_id])
 
-    def route_write(self, row_index: int) -> "NodeInfo | None":
+    def route_write(self, row_index: int):
         """Return the NodeInfo that owns the given row index based on current partition map.
 
         Returns None when cluster mode is off or no routing info is available
@@ -164,7 +189,7 @@ class ClusterRuntime:
         """
         if not self.config.enable_cluster:
             return None
-        return self.registry.get_owner_for_row(row_index)
+        return self.registry.get_owner_for_row(row_index) if hasattr(self.registry, 'get_owner_for_row') else None
 
     def _local_snapshot_as_dict(self, frame_id: str | None = None) -> dict[str, Any]:
         """Serialize write-node snapshot for a specific frame_id to a transport-safe dict."""
@@ -239,7 +264,7 @@ class ClusterRuntime:
         """Merge node snapshots into one frame with schema union and stable row order."""
         if not frames:
             return pd.DataFrame()
-        non_empty = [f.reset_index(drop=True) for f in frames if not f.empty]
+        non_empty = [f.reset_index(drop=True) for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
         if not non_empty:
             return pd.DataFrame()
         merged = pd.concat(non_empty, axis=0, ignore_index=True, sort=False)
