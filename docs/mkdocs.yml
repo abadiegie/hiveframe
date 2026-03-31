@@ -1,0 +1,38 @@
+site_name: hiveframe
+site_description: Transactional distributed DataFrame engine
+site_url: https://abadiegie.github.io/hiveframe
+repo_url: https://github.com/abadiegie/hiveframe
+repo_name: abadiegie/hiveframe
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: amber      
+      accent: orange
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - search.highlight
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Guides:
+    - Checkpoint & Rollback: guides/checkpoint.md
+    - Cell History: guides/cell-history.md
+    - Homelab Setup: guides/homelab-setup.md
+  - API Reference:
+    - DFrame: api/dataframe.md
+    - AgentWriter: api/agent.md
+    - Cluster: api/cluster.md
