@@ -21,39 +21,63 @@ logger = logging.getLogger("core.write_node")
 
 
 class WriteNode:
-    """Thread-safe mutable store for transactional writes."""
+    """Thread-safe mutable store for transactional writes.
 
-    def __init__(self, initial_data: dict[str, list[Any]] | None = None) -> None:
+    If bulk_mode is True, apply() skips defensive copy and rollback for high-throughput batch ingest.
+    This is now the default for all WriteNode instances.
+    """
+
+    def __init__(self, initial_data: dict[str, list[Any]] | None = None, bulk_mode: bool = True) -> None:
         self._lock = Lock()
         self._df = pd.DataFrame(initial_data or {})
         self._version = 0
         self._delta_callback: DeltaCallback | None = None
-
-        logger.info("WriteNode initialized columns=%s rows=%d", list(self._df.columns), len(self._df.index))
+        self._bulk_mode = bulk_mode
+        logger.info("WriteNode initialized columns=%s rows=%d bulk_mode=%s", list(self._df.columns), len(self._df.index), bulk_mode)
 
     def set_delta_callback(self, callback: DeltaCallback) -> None:
         """Register async/non-blocking delta callback for read node sync."""
         self._delta_callback = callback
 
     def apply(self, transaction: Transaction) -> bool:
-        """Apply transaction operations atomically with rollback snapshot."""
-        logger.debug("WriteNode.apply start tx_id=%s ops=%d", transaction.tx_id, len(transaction.operations))
+        """Apply transaction operations atomically with rollback snapshot, unless bulk_mode is enabled.
+
+        In bulk_mode, skips defensive copy and rollback for high-throughput batch ingest.
+        """
+        logger.debug("WriteNode.apply start tx_id=%s ops=%d bulk_mode=%s", transaction.tx_id, len(transaction.operations), self._bulk_mode)
         with self._lock:
-            snapshot = self._df.copy(deep=True)
-            try:
-                delta: list[dict[str, Any]] = []
-                for op in transaction.operations:
-                    col, row_idx = self._parse_cell_id(op.cell_id)
-                    self._ensure_row(row_idx)
-                    if col not in self._df.columns:
-                        self._df[col] = [None] * len(self._df.index)
-                    self._df.at[row_idx, col] = op.new_value
-                    delta.append(op.to_dict())
-                self._version += 1
-            except Exception as e:
-                self._df = snapshot
-                logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
-                return False
+            if self._bulk_mode or getattr(transaction, 'bulk_mode', False):
+                # Bulk mode: skip defensive copy, apply all ops directly
+                try:
+                    delta: list[dict[str, Any]] = []
+                    for op in transaction.operations:
+                        col, row_idx = self._parse_cell_id(op.cell_id)
+                        self._ensure_row(row_idx)
+                        if col not in self._df.columns:
+                            self._df[col] = [None] * len(self._df.index)
+                        self._df.at[row_idx, col] = op.new_value
+                        delta.append(op.to_dict())
+                    self._version += 1
+                except Exception as e:
+                    logger.exception("WriteNode.apply (bulk) failed tx_id=%s error=%s", transaction.tx_id, e)
+                    return False
+            else:
+                # Strict mode: defensive copy for rollback
+                snapshot = self._df.copy(deep=True)
+                try:
+                    delta: list[dict[str, Any]] = []
+                    for op in transaction.operations:
+                        col, row_idx = self._parse_cell_id(op.cell_id)
+                        self._ensure_row(row_idx)
+                        if col not in self._df.columns:
+                            self._df[col] = [None] * len(self._df.index)
+                        self._df.at[row_idx, col] = op.new_value
+                        delta.append(op.to_dict())
+                    self._version += 1
+                except Exception as e:
+                    self._df = snapshot
+                    logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
+                    return False
 
         if self._delta_callback is not None:
             logger.debug("WriteNode.apply dispatching delta callback tx_id=%s version=%d ops=%d", transaction.tx_id, self._version, len(delta))
