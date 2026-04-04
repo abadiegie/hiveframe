@@ -471,7 +471,37 @@ print(metrics)
 ### API Improvements
 
 - `DFrame.from_csv()` and `DFrame.from_excel()` for direct file loading
+- `await DFrame.from_csv_lazy()` and `await DFrame.from_excel_lazy()` for chunked lazy loading (memory O(chunk_size))
 - `df.describe_for_agent()` for LLM context building
+
+#### Lazy Load (CSV/Excel)
+
+Use lazy loaders when files are large and you want chunked ingestion:
+
+```python
+import asyncio
+import hiveframe as hf
+
+async def main() -> None:
+    df_csv = await hf.DFrame.from_csv_lazy(
+        "big.csv",
+        chunk_size=1000,
+        on_progress=lambda n: print(f"csv loaded: {n}"),
+    )
+
+    df_xlsx = await hf.DFrame.from_excel_lazy(
+        "big.xlsx",
+        chunk_size=1000,
+        on_progress=lambda n: print(f"xlsx loaded: {n}"),
+    )
+
+    print(df_csv.shape, df_xlsx.shape)
+
+asyncio.run(main())
+```
+
+For cluster seeding, both lazy methods support `distribute=True` with `runtime=...`.
+If only one write node is available, seeding falls back to local chunked mode.
 
 ---
 
