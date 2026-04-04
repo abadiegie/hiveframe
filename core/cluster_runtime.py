@@ -82,6 +82,7 @@ class ClusterRuntime:
             registry=self.registry,
             wal=self.coordinator.wal,
         )
+        self.replication.set_seed_chunk_handler(self._inject_remote_chunk)
         # Wire replication back into coordinator so commits trigger delta broadcast.
         self.coordinator.replication_manager = self.replication
         self.heartbeat = HeartbeatManager(
@@ -210,6 +211,60 @@ class ClusterRuntime:
         """Serialize write-node snapshot for a specific frame_id to a transport-safe dict."""
         frame = self._build_frame_snapshot(frame_id) if frame_id else self.coordinator.write_node.snapshot()
         return frame.to_dict(orient="list")
+
+    def _inject_remote_chunk(
+        self,
+        frame_id: str,
+        data: dict[str, list[Any]],
+        row_offset: int,
+        sender_id: str,
+    ) -> None:
+        """Inject a remote SEED_CHUNK payload into the local write node."""
+        from .transaction import Transaction, Operation, TxState
+
+        if not data:
+            return
+
+        namespaced = {
+            f"{frame_id}::{col}": values
+            for col, values in data.items()
+        }
+
+        wn = self.coordinator.write_node
+        with wn._lock:
+            chunk_frame = pd.DataFrame(namespaced)
+            chunk_frame.index = range(row_offset, row_offset + len(chunk_frame))
+            if wn._df.empty:
+                wn._df = chunk_frame
+            else:
+                wn._df = pd.concat([wn._df, chunk_frame])
+            wn._version += 1
+
+        summary_tx = Transaction(operations=[
+            Operation(
+                cell_id=f"{frame_id}::__remote_chunk__",
+                old_value=None,
+                new_value={
+                    "row_offset": row_offset,
+                    "rows": len(chunk_frame),
+                    "sender": sender_id,
+                },
+                author_type="human",
+                author_id=f"remote:{sender_id}",
+            )
+        ])
+        summary_tx.transition(TxState.VALIDATING)
+        summary_tx.transition(TxState.LOCKED)
+        summary_tx.transition(TxState.APPLYING)
+        summary_tx.transition(TxState.COMMITTED)
+        self.coordinator.wal.append(summary_tx)
+        logger.info(
+            "_inject_remote_chunk: frame=%s offset=%d rows=%d sender=%s",
+            frame_id,
+            row_offset,
+            len(chunk_frame),
+            sender_id,
+        )
 
     async def read_global_snapshot_for(self, frame_id: str) -> pd.DataFrame:
         """Fan-out snapshot request for a specific frame_id to all healthy writer nodes and merge."""

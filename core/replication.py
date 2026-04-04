@@ -41,6 +41,8 @@ class ReplicationManager:
         self._last_lsn = 0
         self._ack_waiters: dict[int, asyncio.Future[bool]] = {}
         self._apply_entry = apply_entry
+        self._seed_chunk_handler: Callable[[str, dict[str, list[Any]], int, str], None] | None = None
+        self._seen_chunk_offsets: dict[str, set[int]] = {}
 
     async def start(self) -> None:
         existing_handler = self.transport._handler
@@ -80,7 +82,8 @@ class ReplicationManager:
         except asyncio.TimeoutError:
             return False
         finally:
-            self._ack_waiters.pop(lsn, None)
+            if lsn in self._ack_waiters:
+                del self._ack_waiters[lsn]
 
     async def sync_from_lsn(self, from_lsn: int) -> list[dict[str, Any]]:
         return self.wal.get_since(from_lsn)
@@ -88,6 +91,8 @@ class ReplicationManager:
     async def _on_message(self, message: Message) -> None:
         if message.type == MessageType.DELTA and self.role == "read":
             await self._handle_delta(message)
+        elif message.type == MessageType.SEED_CHUNK and self.role == "write":
+            await self._handle_seed_chunk(message)
         elif message.type == MessageType.DELTA_ACK and self.role == "write":
             await self._handle_delta_ack(message)
         elif message.type == MessageType.SYNC_REQUEST and self.role == "write":
@@ -125,6 +130,36 @@ class ReplicationManager:
         waiter = self._ack_waiters.get(lsn)
         if waiter is not None and not waiter.done():
             waiter.set_result(bool(message.payload.get("ok", True)))
+
+    async def _handle_seed_chunk(self, message: Message) -> None:
+        frame_id = str(message.payload.get("frame_id", ""))
+        if not frame_id:
+            return
+        try:
+            row_offset = int(message.payload.get("row_offset", 0))
+        except (TypeError, ValueError):
+            return
+        raw_data = message.payload.get("data", {})
+        if not isinstance(raw_data, dict):
+            return
+        data: dict[str, list[Any]] = {
+            str(col): list(values) if isinstance(values, list) else [values]
+            for col, values in raw_data.items()
+        }
+
+        seen = self._seen_chunk_offsets.setdefault(frame_id, set())
+        if row_offset in seen:
+            logger.debug(
+                "Skipping duplicate SEED_CHUNK frame=%s offset=%d sender=%s",
+                frame_id,
+                row_offset,
+                message.sender_id,
+            )
+            return
+        seen.add(row_offset)
+
+        if self._seed_chunk_handler is not None:
+            self._seed_chunk_handler(frame_id, data, row_offset, message.sender_id)
 
     async def _handle_sync_request(self, message: Message) -> None:
         from_lsn = int(message.payload.get("from_lsn", 0))
@@ -176,4 +211,11 @@ class ReplicationManager:
         The callback may optionally accept a frame_id parameter.
         """
         self._snapshot_provider = provider
+
+    def set_seed_chunk_handler(
+        self,
+        handler: Callable[[str, dict[str, list[Any]], int, str], None],
+    ) -> None:
+        """Register handler for distributed seed chunks received over transport."""
+        self._seed_chunk_handler = handler
 

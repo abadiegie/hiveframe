@@ -24,6 +24,7 @@ class MessageType(Enum):
     BYE = "bye"
 
     DELTA = "delta"
+    SEED_CHUNK = "seed_chunk"
     DELTA_ACK = "delta_ack"
     SYNC_REQUEST = "sync_request"
     SYNC_RESPONSE = "sync_response"

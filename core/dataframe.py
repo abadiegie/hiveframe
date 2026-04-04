@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncIterable, Callable, Iterable
 import asyncio
+import logging
 import time
 
 import pandas as pd
@@ -19,6 +20,9 @@ from .schema import ColumnSchema
 
 if TYPE_CHECKING:
     from .cluster_runtime import ClusterRuntime
+
+
+logger = logging.getLogger("hiveframe.dataframe")
 
 
 def _schema_sidecar_path(parquet_path: Path) -> Path:
@@ -144,6 +148,136 @@ class DFrame:
         data = df.to_dict(orient="list")
         return cls(data, schema=schema)
 
+    @classmethod
+    async def from_csv_lazy(
+        cls,
+        path: str,
+        chunk_size: int = 500,
+        schema: dict[str, ColumnSchema] | None = None,
+        encoding: str = "utf-8",
+        delimiter: str = ",",
+        on_progress: Callable[[int], None] | None = None,
+        distribute: bool = False,
+        runtime: "ClusterRuntime | None" = None,
+        **kwargs,
+    ) -> "DFrame":
+        """Load CSV lazily using chunked reads (memory O(chunk_size))."""
+        coordinator = runtime.coordinator if runtime is not None else None
+        instance = cls(schema=schema, runtime=runtime, coordinator=coordinator)
+
+        if distribute and runtime is None:
+            raise ValueError("from_csv_lazy(distribute=True) requires a runtime")
+
+        def _iter_chunks() -> Iterable[pd.DataFrame]:
+            for chunk in pd.read_csv(
+                path,
+                chunksize=chunk_size,
+                encoding=encoding,
+                delimiter=delimiter,
+                **kwargs,
+            ):
+                yield chunk
+
+        if distribute and runtime is not None:
+            iterator = iter(_iter_chunks())
+
+            def _next_chunk() -> pd.DataFrame | None:
+                try:
+                    return next(iterator)
+                except StopIteration:
+                    return None
+
+            async def _async_chunks() -> AsyncIterable[pd.DataFrame]:
+                while True:
+                    chunk = await asyncio.to_thread(_next_chunk)
+                    if chunk is None:
+                        break
+                    yield chunk
+
+            total = await instance._seed_distributed(_async_chunks(), on_progress=on_progress)
+        else:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(
+                None,
+                lambda: instance._seed_chunked(_iter_chunks(), on_progress=on_progress),
+            )
+
+        logger.info("from_csv_lazy: loaded %d rows from %s", total, path)
+        return instance
+
+    @classmethod
+    async def from_excel_lazy(
+        cls,
+        path: str,
+        sheet_name: str | int = 0,
+        chunk_size: int = 500,
+        schema: dict[str, ColumnSchema] | None = None,
+        on_progress: Callable[[int], None] | None = None,
+        distribute: bool = False,
+        runtime: "ClusterRuntime | None" = None,
+    ) -> "DFrame":
+        """Load Excel lazily using openpyxl read-only stream (memory O(chunk_size))."""
+        coordinator = runtime.coordinator if runtime is not None else None
+        instance = cls(schema=schema, runtime=runtime, coordinator=coordinator)
+
+        if distribute and runtime is None:
+            raise ValueError("from_excel_lazy(distribute=True) requires a runtime")
+
+        def _iter_excel_chunks() -> Iterable[pd.DataFrame]:
+            try:
+                from openpyxl import load_workbook
+            except ImportError as exc:
+                raise ImportError(
+                    "openpyxl is required for from_excel_lazy(). Install with: pip install hiveframe[excel]"
+                ) from exc
+
+            wb = load_workbook(str(path), read_only=True, data_only=True)
+            try:
+                ws = wb.worksheets[sheet_name] if isinstance(sheet_name, int) else wb[sheet_name]
+                headers: list[str] | None = None
+                buffer: list[dict[str, Any]] = []
+
+                for row in ws.iter_rows(values_only=True):
+                    if headers is None:
+                        headers = [str(h) if h is not None else f"col_{idx}" for idx, h in enumerate(row)]
+                        continue
+                    buffer.append(dict(zip(headers, row)))
+                    if len(buffer) >= chunk_size:
+                        yield pd.DataFrame(buffer)
+                        buffer = []
+
+                if buffer:
+                    yield pd.DataFrame(buffer)
+            finally:
+                wb.close()
+
+        if distribute and runtime is not None:
+            iterator = iter(_iter_excel_chunks())
+
+            def _next_chunk() -> pd.DataFrame | None:
+                try:
+                    return next(iterator)
+                except StopIteration:
+                    return None
+
+            async def _async_chunks() -> AsyncIterable[pd.DataFrame]:
+                while True:
+                    chunk = await asyncio.to_thread(_next_chunk)
+                    if chunk is None:
+                        break
+                    yield chunk
+
+            total = await instance._seed_distributed(_async_chunks(), on_progress=on_progress)
+        else:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(
+                None,
+                lambda: instance._seed_chunked(_iter_excel_chunks(), on_progress=on_progress),
+            )
+
+        logger.info("from_excel_lazy: loaded %d rows from %s", total, path)
+        return instance
+
     def describe_for_agent(
         self,
         max_rows: int = 20,
@@ -229,6 +363,198 @@ class DFrame:
         if isinstance(value, list):
             return [self._validate_value(column, item) for item in value]
         return self._validate_value(column, value)
+
+    def _normalize_chunk(self, chunk_df: pd.DataFrame) -> dict[str, list[Any]]:
+        normalized: dict[str, list[Any]] = {}
+        for col in chunk_df.columns:
+            values = chunk_df[col].tolist()
+            validated = self._validate_column_assignment(col, values)
+            normalized[col] = validated if isinstance(validated, list) else [validated]
+        return normalized
+
+    def _append_chunk_to_write_node(
+        self,
+        normalized: dict[str, list[Any]],
+        row_offset: int,
+    ) -> int:
+        if not normalized:
+            return 0
+
+        namespaced = {
+            f"{self._frame_id}::{col}": pd.Series(values, dtype="object")
+            if col in self._schema and self._schema[col].coerce
+            else values
+            for col, values in normalized.items()
+        }
+        chunk_frame = pd.DataFrame(namespaced)
+        chunk_frame.index = range(row_offset, row_offset + len(chunk_frame))
+
+        wn = self._coordinator.write_node
+        with wn._lock:
+            if wn._df.empty:
+                wn._df = chunk_frame
+            else:
+                wn._df = pd.concat([wn._df, chunk_frame])
+            wn._version += 1
+        return len(chunk_frame)
+
+    def _append_chunk_summary_wal(
+        self,
+        *,
+        cell_id: str,
+        row_offset: int,
+        rows: int,
+        cols: list[str],
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        from .transaction import Transaction, Operation, TxState
+
+        payload: dict[str, Any] = {
+            "row_offset": row_offset,
+            "rows": rows,
+            "cols": cols,
+        }
+        if extra:
+            payload.update(extra)
+
+        summary_tx = Transaction(operations=[
+            Operation(
+                cell_id=f"{self._frame_id}::{cell_id}",
+                old_value=None,
+                new_value=payload,
+                author_type="human",
+                author_id="init",
+            )
+        ])
+        summary_tx.transition(TxState.VALIDATING)
+        summary_tx.transition(TxState.LOCKED)
+        summary_tx.transition(TxState.APPLYING)
+        summary_tx.transition(TxState.COMMITTED)
+        self._coordinator.wal.append(summary_tx)
+
+    def _seed_chunk_local(
+        self,
+        chunk_df: pd.DataFrame,
+        row_offset: int,
+        *,
+        wal_cell_id: str,
+        extra_wal: dict[str, Any] | None = None,
+    ) -> int:
+        normalized = self._normalize_chunk(chunk_df)
+        rows = self._append_chunk_to_write_node(normalized, row_offset)
+        if rows == 0:
+            return 0
+        self._append_chunk_summary_wal(
+            cell_id=wal_cell_id,
+            row_offset=row_offset,
+            rows=rows,
+            cols=list(normalized.keys()),
+            extra=extra_wal,
+        )
+        return rows
+
+    def _seed_chunked(
+        self,
+        chunks: Iterable[pd.DataFrame],
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Seed data incrementally from chunk iterable (memory O(chunk_size))."""
+        total = 0
+        for chunk_df in chunks:
+            if chunk_df.empty:
+                continue
+            rows = self._seed_chunk_local(chunk_df, total, wal_cell_id="__bulk_chunk__")
+            total += rows
+            if on_progress:
+                on_progress(total)
+        self._invalidate_snapshot_cache()
+        return total
+
+    async def _send_chunk_to_node(
+        self,
+        chunk_df: pd.DataFrame,
+        *,
+        row_offset: int,
+        target_node_id: str,
+    ) -> int:
+        """Send one chunk to local or remote target write node."""
+        if self._runtime is None:
+            raise RuntimeError("_send_chunk_to_node requires DFrame runtime")
+
+        if target_node_id == self._runtime.config.node_id:
+            rows = self._seed_chunk_local(
+                chunk_df,
+                row_offset,
+                wal_cell_id="__distributed_chunk__",
+                extra_wal={"node": target_node_id},
+            )
+            self._invalidate_snapshot_cache()
+            return rows
+
+        normalized = self._normalize_chunk(chunk_df)
+        if not normalized:
+            return 0
+
+        from .message import Message, MessageType
+
+        message = Message.build(
+            message_type=MessageType.SEED_CHUNK,
+            sender_id=self._runtime.config.node_id,
+            sender_region=self._runtime.config.region,
+            payload={
+                "frame_id": self._frame_id,
+                "row_offset": row_offset,
+                "data": normalized,
+            },
+        )
+        await self._runtime.transport.send(target_node_id, message)
+        return len(next(iter(normalized.values()))) if normalized else 0
+
+    async def _seed_distributed(
+        self,
+        chunks: AsyncIterable[pd.DataFrame],
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Distribute chunked seed across write nodes, fallback to local for single node."""
+        if self._runtime is None:
+            raise RuntimeError(
+                "_seed_distributed requires DFrame with ClusterRuntime. Use DFrame.from_runtime()."
+            )
+
+        write_nodes = await self._runtime.registry.get_write_nodes()
+        if len(write_nodes) <= 1:
+            logger.info(
+                "_seed_distributed: only %d write node(s), falling back to local chunk seed",
+                len(write_nodes),
+            )
+            total = 0
+            async for chunk_df in chunks:
+                if chunk_df.empty:
+                    continue
+                rows = self._seed_chunk_local(chunk_df, total, wal_cell_id="__bulk_chunk__")
+                total += rows
+                if on_progress:
+                    on_progress(total)
+            self._invalidate_snapshot_cache()
+            return total
+
+        total = 0
+        node_idx = 0
+        async for chunk_df in chunks:
+            if chunk_df.empty:
+                continue
+            target_node = write_nodes[node_idx % len(write_nodes)]
+            node_idx += 1
+            rows = await self._send_chunk_to_node(
+                chunk_df,
+                row_offset=total,
+                target_node_id=target_node.node_id,
+            )
+            total += rows
+            if on_progress:
+                on_progress(total)
+        self._invalidate_snapshot_cache()
+        return total
 
     def _seed_initial_data(self, data: dict[str, list[Any]]) -> None:
         # Validate all values if schema is present
