@@ -13,15 +13,20 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
-def reset_shared_state() -> None:
+def reset_shared_state(request: pytest.FixtureRequest) -> None:
     """Reset all class-level shared state before each test to avoid inter-test pollution."""
     from core.registry import ClusterRegistry
     from core.quic_transport import InMemoryQuicTransport
+    from core.tcp_transport import InMemoryTCPTransport, TCPTransport
     from core.dataframe import _RuntimeRegistry
-    ClusterRegistry.reset_shared()
-    InMemoryQuicTransport._registry.clear()
-    _RuntimeRegistry.clear()
-    yield
-    ClusterRegistry.reset_shared()
-    InMemoryQuicTransport._registry.clear()
-    _RuntimeRegistry.clear()
+
+    def reset_all() -> None:
+        ClusterRegistry.reset_shared()
+        InMemoryQuicTransport._registry.clear()
+        InMemoryTCPTransport.reset_shared()
+        TCPTransport.reset_shared()
+        _RuntimeRegistry.clear()
+
+    reset_all()
+    request.addfinalizer(reset_all)
+

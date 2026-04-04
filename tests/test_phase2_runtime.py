@@ -4,6 +4,7 @@
 import asyncio
 import os
 
+import pandas as pd
 import pytest
 
 from core.cluster_runtime import ClusterRuntime, RuntimeConfig
@@ -67,6 +68,72 @@ def test_replication_wired_to_coordinator() -> None:
         RuntimeConfig(node_id="writer-1", role="write", enable_cluster=True)
     )
     assert runtime.coordinator.replication_manager is runtime.replication
+
+
+def test_runtime_sqlite_registry_uses_configured_db_path(tmp_path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "cluster-registry.db"
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="sqlite-w1",
+                role="write",
+                host="127.0.0.1",
+                port=19125,
+                registry_backend="sqlite",
+                db_path=str(db_path),
+            )
+        )
+
+        await runtime.start()
+
+        assert runtime.registry.db_path == str(db_path)
+        assert db_path.exists()
+        node = await runtime.registry.get_node("sqlite-w1")
+        assert node is not None
+        assert node.node_id == "sqlite-w1"
+
+        runtime.registry.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_tcp_transport_global_snapshot_roundtrip() -> None:
+    async def run() -> None:
+        runtime_a = ClusterRuntime(
+            RuntimeConfig(
+                node_id="w-a",
+                role="write",
+                host="127.0.0.1",
+                port=19130,
+                enable_cluster=True,
+                transport_backend="tcp",
+            )
+        )
+        runtime_b = ClusterRuntime(
+            RuntimeConfig(
+                node_id="w-b",
+                role="write",
+                host="127.0.0.1",
+                port=19131,
+                enable_cluster=True,
+                transport_backend="tcp",
+            )
+        )
+
+        await runtime_a.start()
+        await runtime_b.start()
+
+        runtime_a.coordinator.write_node._df = pd.DataFrame({"left": [1]})
+        runtime_b.coordinator.write_node._df = pd.DataFrame({"right": [2]})
+
+        merged = await runtime_a.read_global_snapshot()
+
+        assert len(merged.index) == 2
+        assert set(merged.columns) == {"left", "right"}
+        assert 1 in merged["left"].dropna().tolist()
+        assert 2 in merged["right"].dropna().tolist()
+
+    asyncio.run(run())
 
 
 @integration

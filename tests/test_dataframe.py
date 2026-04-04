@@ -3,10 +3,13 @@
 
 import asyncio
 import time
+from datetime import date
 
+import pandas as pd
 import pytest
 
-from core.dataframe import DFrame
+from core.dataframe import DFrame, read
+from core.schema import ColumnSchema
 
 
 def test_setitem_getitem_groupby() -> None:
@@ -39,6 +42,8 @@ def test_to_persistent_and_reload() -> None:
     time.sleep(0.1)
     path = df.to_persistent("test_frame")
     assert path.exists()
+    reloaded = read(str(path))
+    assert reloaded.read_fresh().to_dict(orient="list") == {"x": [1, 2]}
 
 
 def test_getitem_falls_back_to_fresh_when_read_cache_stale() -> None:
@@ -101,3 +106,100 @@ def test_read_global_lazy_chunking() -> None:
     # Check content
     assert chunks[0].iloc[0]["city"] == "city_0"
     assert chunks[-1].iloc[-1]["score"] == 104
+
+
+def test_schema_validation_runs_during_seed() -> None:
+    with pytest.raises(TypeError, match="Column 'score' expects int"):
+        DFrame(
+            {"score": ["bad"]},
+            schema={"score": ColumnSchema(dtype="int", nullable=False)},
+        )
+
+
+def test_schema_validation_rejects_invalid_assignment() -> None:
+    df = DFrame(
+        {"score": [85]},
+        schema={
+            "score": ColumnSchema(
+                dtype="int",
+                nullable=False,
+                validator=lambda value: 0 <= value <= 100,
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="failed custom validation"):
+        df["score"] = [120]
+
+    assert df.read_fresh().at[0, "score"] == 85
+
+
+def test_schema_date_validation_accepts_python_date() -> None:
+    df = DFrame(
+        {"created_at": [date(2026, 4, 4)]},
+        schema={"created_at": ColumnSchema(dtype="date", nullable=False)},
+    )
+
+    assert df.read_fresh().at[0, "created_at"] == date(2026, 4, 4)
+
+
+def test_schema_date_validation_rejects_non_date_assignment() -> None:
+    df = DFrame(
+        {"created_at": [date(2026, 4, 4)]},
+        schema={"created_at": ColumnSchema(dtype="date", nullable=False)},
+    )
+
+    with pytest.raises(TypeError, match="Column 'created_at' expects date"):
+        df["created_at"] = ["2026-04-04"]
+
+
+def test_schema_coercion_is_opt_in() -> None:
+    with pytest.raises(TypeError, match="Column 'score' expects int"):
+        DFrame(
+            {"score": ["85"]},
+            schema={"score": ColumnSchema(dtype="int", nullable=False)},
+        )
+
+
+def test_schema_coercion_normalizes_seed_and_assignment_values() -> None:
+    df = DFrame(
+        {"score": ["85"]},
+        schema={"score": ColumnSchema(dtype="int", nullable=False, coerce=True)},
+    )
+
+    assert df.read_fresh().at[0, "score"] == 85
+    assert isinstance(df.read_fresh().at[0, "score"], int)
+
+    df["score"] = ["90"]
+    assert df.read_fresh().at[0, "score"] == 90
+    assert isinstance(df.read_fresh().at[0, "score"], int)
+
+
+def test_read_uses_schema_sidecar_for_reload(tmp_path) -> None:
+    df = DFrame(
+        {"score": ["85"]},
+        schema={"score": ColumnSchema(dtype="int", nullable=False, coerce=True, description="0-100")},
+    )
+    df._coordinator.read_node._storage_dir = tmp_path
+
+    path = df.to_persistent("schema_reload")
+    reloaded = read(str(path))
+
+    reloaded["score"] = ["91"]
+    assert reloaded.read_fresh().at[0, "score"] == 91
+    assert reloaded._schema["score"].coerce is True
+    assert reloaded._schema["score"].description == "0-100"
+
+
+def test_read_accepts_explicit_schema_for_parquet_path(tmp_path) -> None:
+    path = tmp_path / "scores.parquet"
+    pd.DataFrame({"score": ["85", "90"]}).to_parquet(path)
+
+    reloaded = read(
+        str(path),
+        schema={"score": ColumnSchema(dtype="int", nullable=False, coerce=True)},
+    )
+
+    assert reloaded.read_fresh().to_dict(orient="list") == {"score": [85, 90]}
+
+

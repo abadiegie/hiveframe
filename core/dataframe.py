@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import asyncio
@@ -18,6 +19,35 @@ from .schema import ColumnSchema
 
 if TYPE_CHECKING:
     from .cluster_runtime import ClusterRuntime
+
+
+def _schema_sidecar_path(parquet_path: Path) -> Path:
+    return parquet_path.with_suffix(parquet_path.suffix + ".schema.json")
+
+
+def _load_schema_sidecar(parquet_path: Path) -> dict[str, ColumnSchema]:
+    sidecar = _schema_sidecar_path(parquet_path)
+    if not sidecar.exists():
+        return {}
+    payload = json.loads(sidecar.read_text())
+    return {column: ColumnSchema.from_dict(schema_payload) for column, schema_payload in payload.items()}
+
+
+def _write_schema_sidecar(parquet_path: Path, schema: dict[str, ColumnSchema]) -> None:
+    sidecar = _schema_sidecar_path(parquet_path)
+    if not schema:
+        if sidecar.exists():
+            sidecar.unlink()
+        return
+    payload = {column: column_schema.to_dict() for column, column_schema in schema.items()}
+    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _resolve_read_path(name_or_path: str, coordinator: TransactionCoordinator) -> Path:
+    candidate = Path(name_or_path)
+    if candidate.suffix == ".parquet" or candidate.exists():
+        return candidate
+    return Path(coordinator.read_node._storage_dir) / f"{candidate}.parquet"
 
 
 class _RuntimeRegistry:
@@ -187,44 +217,39 @@ class DFrame:
                               for c in matching]
             return result.reset_index(drop=True)
 
-    def _validate_value(self, col: str, value: Any) -> None:
+    def _validate_value(self, col: str, value: Any) -> Any:
         schema = self._schema.get(col)
         if not schema:
-            return
-        # Type check
-        if value is None:
-            if not schema.nullable:
-                raise ValueError(f"Column '{col}' is not nullable")
-            return
-        if schema.dtype == "int" and not isinstance(value, int):
-            raise TypeError(f"Column '{col}' expects int, got {type(value).__name__}")
-        if schema.dtype == "float" and not isinstance(value, (float, int)):
-            raise TypeError(f"Column '{col}' expects float, got {type(value).__name__}")
-        if schema.dtype == "str" and not isinstance(value, str):
-            raise TypeError(f"Column '{col}' expects str, got {type(value).__name__}")
-        if schema.dtype == "bool" and not isinstance(value, bool):
-            raise TypeError(f"Column '{col}' expects bool, got {type(value).__name__}")
-        # Custom validator
-        if schema.validator and not schema.validator(value):
-            raise ValueError(f"Column '{col}' failed custom validation: {value}")
+            return value
+        return schema.validate(value, column_name=col)
+
+    def _validate_column_assignment(self, column: str, value: Any) -> Any:
+        if column not in self._schema:
+            return value
+        if isinstance(value, list):
+            return [self._validate_value(column, item) for item in value]
+        return self._validate_value(column, value)
 
     def _seed_initial_data(self, data: dict[str, list[Any]]) -> None:
         # Validate all values if schema is present
+        normalized_data: dict[str, list[Any]] = {}
         for col, values in data.items():
-            for v in values:
-                self._validate_value(col, v)
+            normalized = self._validate_column_assignment(col, values)
+            normalized_data[col] = normalized if isinstance(normalized, list) else [normalized]
         """
         Inject initial data directly to write_node._df - bypass per-cell ops.
         WAL only records a single summary entry for the entire seed.
         """
-        max_len = max((len(v) for v in data.values()), default=0)
+        max_len = max((len(v) for v in normalized_data.values()), default=0)
         if max_len == 0:
             return
 
         # Build namespaced columns directly
         namespaced = {
-            f"{self._frame_id}::{col}": values
-            for col, values in data.items()
+            f"{self._frame_id}::{col}": pd.Series(values, dtype="object")
+            if col in self._schema and self._schema[col].coerce
+            else values
+            for col, values in normalized_data.items()
         }
 
         wn = self._coordinator.write_node
@@ -243,7 +268,7 @@ class DFrame:
             Operation(
                 cell_id=f"{self._frame_id}::__bulk_init__",
                 old_value=None,
-                new_value={"rows": max_len, "cols": list(data.keys())},
+                new_value={"rows": max_len, "cols": list(normalized_data.keys())},
                 author_type="human",
                 author_id="init",
             )
@@ -256,19 +281,16 @@ class DFrame:
         self._invalidate_snapshot_cache()
 
     def __setitem__(self, column: str, value: Any) -> None:
-        # Validate all values if schema is present
-        if column in self._schema:
-            if isinstance(value, list):
-                for v in value:
-                    self._validate_value(column, v)
-            else:
-                self._validate_value(column, value)
         """Set a full column value, routing each row to its owning node."""
         snapshot = self.read_fresh()
         row_count = len(snapshot.index)
-        values = value if isinstance(value, list) else [value] * max(row_count, 1)
+        values = list(value) if isinstance(value, list) else [value] * max(row_count, 1)
         if row_count == 0:
             row_count = len(values)
+        total_rows = max(row_count, len(values))
+        if len(values) < total_rows:
+            values.extend([None] * (total_rows - len(values)))
+        values = self._validate_column_assignment(column, values)
 
         from collections import defaultdict
         node_ops: dict[str, list[Operation]] = defaultdict(list)
@@ -587,7 +609,11 @@ class DFrame:
         if not self._is_cache_complete_for(cached, set(frame.columns)):
             for col in frame.columns:
                 self[col] = frame[col].tolist()
-        return self._coordinator.read_node.persist(name)
+        path = Path(self._coordinator.read_node._storage_dir) / f"{name}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(path)
+        _write_schema_sidecar(path, self._schema)
+        return path
 
     def _read_cached(self) -> pd.DataFrame:
         """Read current cache snapshot filtered for this frame."""
@@ -693,11 +719,19 @@ class DFrame:
         }
 
 
-def read(name: str, coordinator: TransactionCoordinator | None = None) -> DFrame:
-    """Load persisted dataframe from parquet into a new DFrame instance."""
-    df = DFrame(coordinator=coordinator)
-    frame = df._coordinator.read_node.load(name)
-    # frame is a pandas.DataFrame from ReadNode.load
-    for col in frame.columns:
-        df[col] = frame[col].tolist()
-    return df
+def read(
+    name: str,
+    coordinator: TransactionCoordinator | None = None,
+    schema: dict[str, ColumnSchema] | None = None,
+) -> DFrame:
+    """Load persisted dataframe from parquet into a new DFrame instance.
+
+    `name` may be either a dataset name previously used with `to_persistent()`
+    or a full parquet file path.
+    """
+    resolved_coordinator = coordinator or TransactionCoordinator()
+    parquet_path = _resolve_read_path(name, resolved_coordinator)
+    frame = pd.read_parquet(parquet_path)
+    resolved_schema = schema or _load_schema_sidecar(parquet_path)
+    data = frame.to_dict(orient="list")
+    return DFrame(data=data, coordinator=resolved_coordinator, schema=resolved_schema)

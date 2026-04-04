@@ -35,14 +35,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--region", default="ap-southeast-1", help="Region label")
     p.add_argument("--nats-url", default="nats://127.0.0.1:4222", help="NATS URL for registry")
     p.add_argument(
+        "--db-path",
+        default=".hiveframe/registry.db",
+        help="SQLite registry path when --registry-backend sqlite is used",
+    )
+    p.add_argument(
         "--registry-backend",
-        choices=["memory", "nats"],
+        choices=["memory", "nats", "sqlite"],
         default="memory",
         help="Registry backend (default: memory)",
     )
     p.add_argument(
         "--transport-backend",
-        choices=["memory", "quic"],
+        choices=["memory", "quic", "tcp"],
         default="memory",
         help="Transport backend (default: memory)",
     )
@@ -66,6 +71,7 @@ async def run(args: argparse.Namespace) -> None:
         port=args.port,
         region=args.region,
         nats_url=args.nats_url,
+        db_path=args.db_path,
         registry_backend=args.registry_backend,
         transport_backend=args.transport_backend,
         partition_start=args.partition_start,
@@ -78,7 +84,7 @@ async def run(args: argparse.Namespace) -> None:
     await runtime.start()
 
     logger.info(
-        "Node started  id=%s  role=%s  host=%s  port=%d  region=%s  registry=%s  transport=%s",
+        "Node started  id=%s  role=%s  host=%s  port=%d  region=%s  registry=%s  transport=%s  db_path=%s",
         config.node_id,
         config.role,
         config.host,
@@ -86,6 +92,7 @@ async def run(args: argparse.Namespace) -> None:
         config.region,
         config.registry_backend,
         config.transport_backend,
+        config.db_path,
     )
 
     # Keep running until SIGINT / SIGTERM.

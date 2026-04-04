@@ -36,6 +36,7 @@ class RuntimeConfig:
     partition_start: int = 0
     partition_end: int = 1000
     nats_url: str = "nats://127.0.0.1:4222"
+    db_path: str = ".hiveframe/registry.db"
     enable_cluster: bool = False
     registry_backend: str = "memory"  # memory | nats | sqlite
     transport_backend: str = "memory"  # memory | quic | tcp
@@ -51,7 +52,7 @@ class ClusterRuntime:
 
         # Registry selection
         if config.registry_backend == "sqlite":
-            self.registry = SQLiteRegistry()
+            self.registry = SQLiteRegistry(config.db_path)
             self._NodeInfo = SQLiteNodeInfo
         elif config.registry_backend == "nats":
             from .registry import ClusterRegistry
@@ -64,14 +65,14 @@ class ClusterRuntime:
 
         # Transport selection
         if config.transport_backend == "tcp":
-            self.transport = TCPTransport(config.host, config.port)
-            self.transport.start_server()
-        elif config.transport_backend == "quic":
-            from .quic_transport import QuicTransport
-            self.transport = QuicTransport(config.host, config.port)
-            self.transport.start_server()
+            self.transport = TCPTransport(host=config.host, port=config.port, node_id=config.node_id)
         else:
-            self.transport = None  # fallback or in-memory
+            from .quic_transport import QuicTransport
+
+            # Both "memory" and "quic" share the same async transport contract.
+            # QuicTransport already provides an in-process fallback when a full QUIC
+            # runtime is not wired.
+            self.transport = QuicTransport(node_id=config.node_id)
 
         self.replication = ReplicationManager(
             node_id=config.node_id,
@@ -92,7 +93,7 @@ class ClusterRuntime:
 
         # Log initialization info for observability
         logger.info(
-            "ClusterRuntime initialized: id=%s role=%s host=%s port=%s region=%s enable_cluster=%s registry=%s transport=%s nats_url=%s",
+            "ClusterRuntime initialized: id=%s role=%s host=%s port=%s region=%s enable_cluster=%s registry=%s transport=%s nats_url=%s db_path=%s",
             config.node_id,
             config.role,
             config.host,
@@ -102,6 +103,7 @@ class ClusterRuntime:
             config.registry_backend,
             config.transport_backend,
             config.nats_url,
+            config.db_path,
         )
 
     async def start(self) -> None:
@@ -151,6 +153,18 @@ class ClusterRuntime:
 
         await self.registry.register(node_info)
         logger.info("Node registered: %s (role=%s host=%s port=%s)", node_info.node_id, node_info.role, node_info.host, node_info.port)
+        await self._refresh_transport_peers()
+
+    async def _refresh_transport_peers(self) -> None:
+        """Seed transport peer map from registry entries when transport supports it."""
+        if not hasattr(self.transport, "register_peer"):
+            return
+        write_nodes = await self.registry.get_write_nodes()
+        read_nodes = await self.registry.get_read_nodes()
+        for node in [*write_nodes, *read_nodes]:
+            if node.node_id == self.config.node_id:
+                continue
+            self.transport.register_peer(node.node_id, node.host, node.port)
 
     async def _on_registry_event(self, node, event: str) -> None:
         """Broadcast REBALANCE message to all peers when partition map changes."""
@@ -159,6 +173,7 @@ class ClusterRuntime:
             return
         from .message import Message, MessageType
         writers = await self.registry.get_write_nodes()
+        await self._refresh_transport_peers()
         if not writers:
             logger.debug("No writer nodes found during registry event; skipping rebalance broadcast")
             return
@@ -202,6 +217,7 @@ class ClusterRuntime:
 
         local_frame = self._build_frame_snapshot(frame_id)
         write_nodes = await self.registry.get_write_nodes()
+        await self._refresh_transport_peers()
         remote_nodes = [n for n in write_nodes if n.node_id != self.config.node_id]
 
         if not remote_nodes or not self.config.enable_cluster:
@@ -225,13 +241,20 @@ class ClusterRuntime:
             snapshot_dict = dict(response.payload.get("snapshot", {}))
             return self._frame_from_dict(snapshot_dict)
 
-        remote_frames = await asyncio.gather(
-            *[fetch_one(n.node_id) for n in remote_nodes],
-            return_exceptions=True,
-        )
+        tasks: list[tuple[str, asyncio.Task[pd.DataFrame]]] = [
+            (node.node_id, asyncio.create_task(fetch_one(node.node_id))) for node in remote_nodes
+        ]
+        await asyncio.wait([task for _, task in tasks])
+        remote_frames: list[pd.DataFrame] = []
+        for node_id, task in tasks:
+            try:
+                frame = task.result()
+                remote_frames.append(frame)
+            except Exception as exc:
+                logger.warning("Failed to fetch frame snapshot from remote writer %s: %s", node_id, exc)
         frames = [local_frame]
         for result in remote_frames:
-            if isinstance(result, pd.DataFrame) and not result.empty:
+            if not result.empty:
                 frames.append(result)
         return self._merge_snapshots(frames)
 
@@ -285,6 +308,7 @@ class ClusterRuntime:
 
         # In standalone mode or with only this node in registry, skip fan-out.
         write_nodes = await self.registry.get_write_nodes()
+        await self._refresh_transport_peers()
         remote_nodes = [n for n in write_nodes if n.node_id != self.config.node_id]
 
         if not remote_nodes or not self.config.enable_cluster:
@@ -309,14 +333,21 @@ class ClusterRuntime:
             snapshot_dict = dict(response.payload.get("snapshot", {}))
             return self._frame_from_dict(snapshot_dict)
 
-        remote_frames = await asyncio.gather(
-            *[fetch_one(n.node_id) for n in remote_nodes],
-            return_exceptions=True,
-        )
+        tasks: list[tuple[str, asyncio.Task[pd.DataFrame]]] = [
+            (node.node_id, asyncio.create_task(fetch_one(node.node_id))) for node in remote_nodes
+        ]
+        await asyncio.wait([task for _, task in tasks])
+        remote_frames: list[pd.DataFrame] = []
+        for node_id, task in tasks:
+            try:
+                frame = task.result()
+                remote_frames.append(frame)
+            except Exception as exc:
+                logger.warning("Failed to fetch global snapshot from remote writer %s: %s", node_id, exc)
 
         frames = [local_frame]
         for result in remote_frames:
-            if isinstance(result, pd.DataFrame) and not result.empty:
+            if not result.empty:
                 frames.append(result)
 
         return self._merge_snapshots(frames)
