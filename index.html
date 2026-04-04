@@ -1819,7 +1819,8 @@
 <a href=""><img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue" /></a>
 Transactional, distributed-ready pandas-compatible DataFrame engine.</p>
 <p><strong>hiveframe</strong> scales DataFrame workloads across many small machines with transactions, persistence, and AI agent support built in. No new paradigm to learn. Just <code>import hiveframe as hf</code>.</p>
-<p>Supports single-node standalone mode and optional multi-node cluster mode with QUIC transport, NATS registry, heartbeat, WAL-based delta replication, <strong>global read fan-out</strong>, <strong>dynamic partition assignment</strong>, and <strong>per-DFrame namespace isolation</strong> — multiple independent DataFrames can run on the same cluster node without overlap.</p>
+<p>Supports single-node standalone mode and optional multi-node cluster mode with QUIC/TCP transport, NATS/SQLite registry, heartbeat, WAL-based delta replication, <strong>global read fan-out</strong>, <strong>dynamic partition assignment</strong>, and <strong>per-DFrame namespace isolation</strong> — multiple independent DataFrames can run on the same cluster node without overlap.</p>
+<p>Note: <code>TCPTransport</code> now uses real asyncio TCP sockets for cluster runtime traffic. The previous process-local compatibility behavior is preserved in <code>InMemoryTCPTransport</code> for legacy sync callers/tests.</p>
 <hr />
 <h2 id="table-of-contents">Table of Contents</h2>
 <ul>
@@ -1916,7 +1917,7 @@ Transactional, distributed-ready pandas-compatible DataFrame engine.</p>
 <pre><code>core/
 ├── coordinator.py      # Transaction lifecycle (lock → apply → WAL → replicate)
 ├── write_node.py       # Mutable pandas write path
-├── read_node.py        # Polars read replica with sync lag
+├── read_node.py        # Pandas read replica with sync lag + parquet persistence
 ├── lock_manager.py     # Cell-level lock manager
 ├── wal.py              # In-memory append-only WAL with LSN
 ├── transaction.py      # State machine + Operation model
@@ -1954,6 +1955,7 @@ pytest
 df = hf.read(&quot;.dframe_store/employee_data.parquet&quot;)
 print(df.head())
 </code></pre>
+<p><code>hf.read(...)</code> accepts either a full parquet path or the persisted dataset name used with <code>to_persistent(...)</code>.</p>
 <p>Run the ready-to-use example:</p>
 <pre><code class="language-bash">.venv/bin/python examples/hiveframe_import_usage.py
 </code></pre>
@@ -2025,8 +2027,8 @@ print(df.describe())
 </code></pre>
 <h3 id="cluster-mode-optional">Cluster mode (optional)</h3>
 <p>Enable with <code>enable_cluster=True</code>. The node will:
-- listen on transport (QUIC/in-memory),
-- register to the registry (NATS/in-memory),
+- listen on transport (<code>memory</code>, <code>quic</code>, or <code>tcp</code>),
+- register to the registry (<code>memory</code>, <code>nats</code>, or <code>sqlite</code>),
 - start heartbeat,
 - broadcast WAL delta to read replicas after each commit,
 - auto-assign and rebalance partitions when nodes join or fail,
@@ -2152,6 +2154,11 @@ merged = await df_a.read_fresh_async()  # 3 rows total
 <td>NATS server URL (optional)</td>
 </tr>
 <tr>
+<td><code>db_path</code></td>
+<td><code>".hiveframe/registry.db"</code></td>
+<td>SQLite registry file path when <code>registry_backend="sqlite"</code></td>
+</tr>
+<tr>
 <td><code>enable_cluster</code></td>
 <td><code>False</code></td>
 <td>Enable transport + registry + heartbeat + global read</td>
@@ -2188,10 +2195,11 @@ merged = await df_a.read_fresh_async()  # 3 rows total
 <li><code>registry_backend="sqlite"</code> — zero dependency, persistent registry for dev/homelab/single-machine</li>
 <li><code>registry_backend="nats"</code> — production-ready, distributed registry (requires NATS)</li>
 <li><code>registry_backend="memory"</code> — in-memory, for testing/dev only</li>
-<li><code>transport_backend="tcp"</code> — zero dependency, local network transport (for dev/homelab)</li>
+<li><code>transport_backend="tcp"</code> — network-real asyncio TCP socket transport (zero extra dependency)</li>
 <li><code>transport_backend="quic"</code> — production-ready, cross-region, low-latency</li>
-<li><code>transport_backend="memory"</code> — in-memory, for testing/dev only</li>
+<li><code>transport_backend="memory"</code> — in-memory QUIC fallback for testing/dev only</li>
 </ul>
+<p>Migration note: legacy sync shim methods (<code>start_server</code>, <code>register_handler</code>, <code>send(host, port, dict)</code>) now belong to <code>InMemoryTCPTransport</code>, not <code>TCPTransport</code>.</p>
 <h4 id="example-sqlite-registry-and-tcp-transport">Example: SQLite registry and TCP transport</h4>
 <pre><code class="language-python">from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig
 
@@ -2202,8 +2210,10 @@ runtime = ClusterRuntime(RuntimeConfig(
     enable_cluster=True,
     registry_backend=&quot;sqlite&quot;,
     transport_backend=&quot;tcp&quot;,
+    db_path=&quot;.hiveframe/dev-registry.db&quot;,
 ))
 </code></pre>
+<p>Use this combination for single-machine or homelab deployments where you want a persistent registry without running NATS.</p>
 <hr />
 <h2 id="install-extras">Install extras</h2>
 <pre><code class="language-bash"># Real NATS backend
@@ -2412,15 +2422,29 @@ RUN_PHASE2_INTEGRATION=1 NATS_URL=nats://127.0.0.1:4222 pytest tests/test_phase2
   --registry-backend nats \
   --nats-url nats://127.0.0.1:4222
 </code></pre>
+<p><strong>With SQLite registry + TCP transport</strong> (single machine / homelab):</p>
+<pre><code class="language-bash">python examples/start_cluster.py \
+  --node-id writer-1 \
+  --role write \
+  --port 19000 \
+  --registry-backend sqlite \
+  --transport-backend tcp \
+  --db-path .hiveframe/cluster-a.db
+</code></pre>
+<p>Minimal end-to-end 2-node TCP demo:</p>
+<pre><code class="language-bash">python examples/tcp_two_node_e2e.py
+</code></pre>
+<p>Manual multi-process runbook (Terminal 1/2/3): see <code>guides/homelab-setup.md</code>.</p>
 <p>All available options:</p>
 <pre><code>--node-id           Unique node ID (required)
 --role              write | read (required)
 --host              Bind host (default: 127.0.0.1)
 --port              Bind port (default: 19000)
 --region            Region label (default: ap-southeast-1)
---registry-backend  memory | nats (default: memory)
---transport-backend memory | quic (default: memory)
+--registry-backend  memory | nats | sqlite (default: memory)
+--transport-backend memory | quic | tcp (default: memory)
 --nats-url          NATS server URL (default: nats://127.0.0.1:4222)
+--db-path           SQLite registry path (default: .hiveframe/registry.db)
 --partition-start   Initial partition range start (default: 0, auto-rebalanced)
 --partition-end     Initial partition range end (default: 1000, auto-rebalanced)
 </code></pre>

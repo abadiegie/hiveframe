@@ -596,6 +596,67 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#minimal-2-node-tcp-end-to-end" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal 2-Node TCP End-to-End
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-multi-process-runbook-terminal-123" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual Multi-Process Runbook (Terminal 1/2/3)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Manual Multi-Process Runbook (Terminal 1/2/3)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#terminal-1-writer-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 1 — writer node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#terminal-2-second-writer-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 2 — second writer node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#terminal-3-verify-both-nodes-are-registered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 3 — verify both nodes are registered
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -814,6 +875,67 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#minimal-2-node-tcp-end-to-end" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal 2-Node TCP End-to-End
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-multi-process-runbook-terminal-123" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual Multi-Process Runbook (Terminal 1/2/3)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Manual Multi-Process Runbook (Terminal 1/2/3)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#terminal-1-writer-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 1 — writer node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#terminal-2-second-writer-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 2 — second writer node
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#terminal-3-verify-both-nodes-are-registered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Terminal 3 — verify both nodes are registered
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -841,6 +963,7 @@
 <ul>
 <li>Use <code>registry_backend="sqlite"</code> for zero-dependency persistent registry</li>
 <li>Use <code>transport_backend="tcp"</code> for local network communication</li>
+<li>Point every node at the same <code>db_path</code> when they should share one registry state</li>
 </ul>
 <h2 id="example">Example</h2>
 <pre><code class="language-python">from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig
@@ -852,9 +975,58 @@ runtime = ClusterRuntime(RuntimeConfig(
     enable_cluster=True,
     registry_backend=&quot;sqlite&quot;,
     transport_backend=&quot;tcp&quot;,
+    db_path=&quot;.hiveframe/homelab-registry.db&quot;,
 ))
 </code></pre>
-<p>This setup requires no external services and is perfect for home clusters.</p>
+<p>This setup requires no external services and is perfect for home clusters. Use a stable shared path such as <code>.hiveframe/homelab-registry.db</code> for every local node process that should participate in the same registry.</p>
+<h2 id="minimal-2-node-tcp-end-to-end">Minimal 2-Node TCP End-to-End</h2>
+<p>Run the dedicated demo script:</p>
+<pre><code class="language-bash">python examples/tcp_two_node_e2e.py
+</code></pre>
+<p>Expected output (merged snapshot from two writer nodes):</p>
+<pre><code class="language-text">Merged snapshot:
+   left  right
+0   1.0    NaN
+1   NaN    2.0
+</code></pre>
+<p>This demo starts two writer runtimes on localhost with <code>registry_backend="sqlite"</code> + <code>transport_backend="tcp"</code>, writes one row on each node, and reads a global merged snapshot.</p>
+<h2 id="manual-multi-process-runbook-terminal-123">Manual Multi-Process Runbook (Terminal 1/2/3)</h2>
+<p>Use this when you want to run each node manually in separate terminals.</p>
+<h3 id="terminal-1-writer-node">Terminal 1 — writer node</h3>
+<pre><code class="language-bash">python examples/start_cluster.py \
+  --node-id tcp-w1 \
+  --role write \
+  --host 127.0.0.1 \
+  --port 19400 \
+  --registry-backend sqlite \
+  --transport-backend tcp \
+  --db-path .hiveframe/tcp-manual.db
+</code></pre>
+<h3 id="terminal-2-second-writer-node">Terminal 2 — second writer node</h3>
+<pre><code class="language-bash">python examples/start_cluster.py \
+  --node-id tcp-w2 \
+  --role write \
+  --host 127.0.0.1 \
+  --port 19401 \
+  --registry-backend sqlite \
+  --transport-backend tcp \
+  --db-path .hiveframe/tcp-manual.db
+</code></pre>
+<h3 id="terminal-3-verify-both-nodes-are-registered">Terminal 3 — verify both nodes are registered</h3>
+<pre><code class="language-bash">python - &lt;&lt;'PY'
+import sqlite3
+
+conn = sqlite3.connect('.hiveframe/tcp-manual.db')
+rows = conn.execute(
+    &quot;SELECT node_id, role, host, port, status FROM nodes ORDER BY node_id&quot;
+).fetchall()
+conn.close()
+
+for row in rows:
+    print(row)
+PY
+</code></pre>
+<p>Expected: both <code>tcp-w1</code> and <code>tcp-w2</code> appear with <code>status='healthy'</code>.</p>
 
 
 
