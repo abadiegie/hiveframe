@@ -55,6 +55,7 @@ tmp/
 temp/
 *.tmp
 .dframe_store/
+.hiveframe/
 
 # Optional lock files
 Pipfile.lock
