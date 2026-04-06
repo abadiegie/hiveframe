@@ -724,6 +724,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#review-verdicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Review Verdicts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#result-types" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -877,6 +888,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#review-verdicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Review Verdicts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#result-types" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -949,19 +971,34 @@
 </ul>
 <h2 id="multiframeagent-key-methods">MultiFrameAgent Key Methods</h2>
 <ul>
-<li><code>analyze(instruction, mode="sample", output_frame=None, ...)</code> — Analyze one or many frames</li>
+<li><code>analyze(instruction, mode="sample", output_frame=None, max_retries=0, ...)</code> — Analyze one or many frames</li>
 <li><code>_safe_eval(query_str, df)</code> — Guarded pandas expression executor for query mode</li>
 <li><code>_build_schema_context()</code> — Build schema + numeric stats context (without sample rows)</li>
 </ul>
 <h3 id="analysis-modes">Analysis Modes</h3>
 <ul>
 <li><code>sample</code> — one LLM call using <code>describe_for_agent()</code> context per frame</li>
-<li><code>query</code> — two LLM calls (<code>query generation -&gt; execute -&gt; analysis</code>)</li>
+<li><code>query</code> — iterative loop (<code>plan/act -&gt; review -&gt; optional retry -&gt; final analysis</code>)</li>
 </ul>
 <p>In <code>query</code> mode:
 - each generated query must start with <code>df</code>
 - forbidden patterns (<code>import</code>, <code>exec</code>, <code>eval</code>, <code>open</code>, <code>os</code>, <code>sys</code>, etc.) are rejected
-- if no queries are generated, flow falls back to sample mode</p>
+- if no queries are generated, flow falls back to sample mode
+- set <code>max_retries &gt; 0</code> to enable iterative review/retry; keep <code>max_retries=0</code> for legacy simple flow</p>
+<h3 id="review-verdicts">Review Verdicts</h3>
+<ul>
+<li><code>accepted</code></li>
+<li><code>partial</code></li>
+<li><code>error</code></li>
+<li><code>plan</code></li>
+<li><code>rejected</code></li>
+<li><code>merge</code></li>
+</ul>
+<p><code>MultiFrameResult</code> also includes iterative metadata:
+- <code>review_history</code>
+- <code>total_llm_calls</code>
+- <code>converged</code>
+- <code>final_verdict</code></p>
 <h3 id="result-types">Result Types</h3>
 <ul>
 <li><code>MultiFrameResult</code></li>
