@@ -123,3 +123,191 @@ def parse_plan(response_text: str) -> dict[str, Any]:
         except (json.JSONDecodeError, ValueError):
             pass
     return {}
+
+
+MULTI_FRAME_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
+    {
+        "role": "user",
+        "content": (
+            "Bandingkan total penjualan per region antara "
+            "frame sales_q1 dan sales_q2"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"action":"cross_reference",'
+            '"reasoning":"Compare regional sales between Q1 and Q2.",'
+            '"analysis":"Region Jawa Barat menunjukkan pertumbuhan '
+            '23% dari Q1 ke Q2, sementara DKI Jakarta stagnan di '
+            '+2%. Region Sulawesi mengalami penurunan 8%.",'
+            '"insights":[{'
+            '"finding":"Jawa Barat growth 23% Q1->Q2",'
+            '"frames":["sales_q1","sales_q2"],'
+            '"confidence":0.95}],'
+            '"operations":[]}'
+        ),
+    },
+]
+
+
+QUERY_GEN_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
+    {
+        "role": "user",
+        "content": (
+            "Produk mana yang penjualannya tinggi tapi stok menipis? "
+            "frames: sales, inventory"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"queries":{'
+            '"sales":"df.groupby(\'product_id\')[\'qty_sold\']'
+            '.sum().nlargest(50).reset_index()",'
+            '"inventory":"df[df[\'stock_qty\'] < '
+            'df[\'reorder_point\']][['
+            '\'product_id\',\'stock_qty\',\'reorder_point\']]"'
+            '},'
+            '"reasoning":"Get top 50 products by sales, '
+            'cross with items below reorder point."}'
+        ),
+    },
+]
+
+
+def build_multi_frame_messages(
+    instruction: str,
+    frame_contexts: dict[str, str],
+    mode: str = "sample",
+    include_few_shot: bool = True,
+) -> list[dict[str, str]]:
+    """Build messages untuk sample mode analysis."""
+    _ = mode  # reserved for future prompt variants
+    system = (
+        "You are a data analysis agent with access to one or more "
+        "DataFrames.\n"
+        "Each DataFrame is identified by a label.\n\n"
+        "## Your job\n\n"
+        "Analyze the data across all provided DataFrames and "
+        "generate insights based on the user instruction.\n\n"
+        "## Rules\n\n"
+        "- Reference frames by their label\n"
+        "- Never invent data - only analyze what is shown\n"
+        "- Cite which frames support each finding\n"
+        "- Include confidence for each insight (0.0-1.0)\n"
+        "- If asked to write results, include operations array\n"
+        "  with cell_id, value, confidence per item\n\n"
+        "## Response format\n\n"
+        "Respond with raw JSON (no markdown fences):\n"
+        '{"action":"analyze|cross_reference|batch_enrich",'
+        '"reasoning":"...","analysis":"narrative text",'
+        '"insights":[{"finding":"...","frames":[...],'
+        '"confidence":0.0}],'
+        '"operations":[]}'
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    context_parts: list[str] = []
+    for label, snapshot in frame_contexts.items():
+        context_parts.append(f"## DataFrame: `{label}`\n\n{snapshot}")
+
+    if context_parts:
+        messages.append({"role": "system", "content": "\n\n---\n\n".join(context_parts)})
+
+    if include_few_shot:
+        messages.extend(MULTI_FRAME_FEW_SHOT_EXAMPLES)
+
+    messages.append({"role": "user", "content": instruction})
+    return messages
+
+
+def build_query_generation_messages(
+    instruction: str,
+    frame_schemas: dict[str, str],
+) -> list[dict[str, str]]:
+    """Build messages untuk fase 1 query mode."""
+    system = (
+        "You are a data analyst. Given DataFrame schemas and "
+        "an instruction, generate pandas queries to extract "
+        "the most relevant data for analysis.\n\n"
+        "## Rules\n\n"
+        "- Each query MUST start with 'df'\n"
+        "- Only use pandas methods - no imports, no file I/O\n"
+        "- Return aggregated/filtered data, not raw full frames\n"
+        "- Keep results focused - prefer top-N over all rows\n"
+        "- If instruction only needs one frame, query one frame\n"
+        "- Forbidden: import, exec, eval, open, os, sys\n\n"
+        "## Allowed pandas methods\n\n"
+        "groupby, filter, query, nlargest, nsmallest, "
+        "sort_values, head, tail, describe, value_counts, "
+        "merge, pivot_table, agg, apply, loc, iloc\n\n"
+        "## Response format\n\n"
+        "Raw JSON only:\n"
+        '{"queries":{"frame_label":"df_expression",...},'
+        '"reasoning":"why these queries"}'
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    schema_parts: list[str] = []
+    for label, schema_str in frame_schemas.items():
+        schema_parts.append(f"## DataFrame schema: `{label}`\n\n{schema_str}")
+
+    if schema_parts:
+        messages.append({"role": "system", "content": "\n\n---\n\n".join(schema_parts)})
+
+    messages.extend(QUERY_GEN_FEW_SHOT_EXAMPLES)
+    messages.append({"role": "user", "content": instruction})
+    return messages
+
+
+def build_analysis_messages(
+    instruction: str,
+    query_results: dict[str, str],
+    query_errors: dict[str, str],
+    original_queries: dict[str, str],
+) -> list[dict[str, str]]:
+    """Build messages untuk fase 2 query mode."""
+    system = (
+        "You are a data analyst. Query results have been "
+        "provided from one or more DataFrames. "
+        "Generate a clear analysis based on these results.\n\n"
+        "## Rules\n\n"
+        "- Base analysis ONLY on provided query results\n"
+        "- Cite which frames support each finding\n"
+        "- Note any query errors that limited the analysis\n"
+        "- Include confidence per insight\n\n"
+        "## Response format\n\n"
+        "Raw JSON only:\n"
+        '{"action":"analyze",'
+        '"reasoning":"...","analysis":"narrative",'
+        '"insights":[{"finding":"...","frames":[...],'
+        '"confidence":0.0}],'
+        '"operations":[]}'
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    result_parts = [f"## Original instruction\n\n{instruction}"]
+
+    for label, result_str in query_results.items():
+        query_used = original_queries.get(label, "")
+        result_parts.append(
+            f"## Query result: `{label}`\n\n"
+            f"Query: `{query_used}`\n\n"
+            f"Result:\n```\n{result_str}\n```"
+        )
+
+    if query_errors:
+        error_parts = [f"- `{label}`: {err}" for label, err in query_errors.items()]
+        result_parts.append(
+            "## Query errors (frames with errors could not be analyzed)\n\n"
+            + "\n".join(error_parts)
+        )
+
+    messages.append({"role": "system", "content": "\n\n---\n\n".join(result_parts)})
+    messages.append({"role": "user", "content": "Generate analysis based on the query results above."})
+    return messages
+

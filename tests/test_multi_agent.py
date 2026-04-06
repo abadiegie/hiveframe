@@ -1,0 +1,278 @@
+# Copyright 2026 Abadi Gilang
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import json
+
+import pandas as pd
+import pytest
+
+from agent.multi_agent import MultiFrameAgent
+from agent.result import FrameInsight, MultiFrameResult
+from core.dataframe import DFrame
+
+
+@pytest.fixture
+def frame_sales() -> DFrame:
+    return DFrame({"city": ["jakarta", "bandung", "jakarta"], "score": [90, 80, 70]})
+
+
+@pytest.fixture
+def frame_inventory() -> DFrame:
+    return DFrame({"product_id": ["a", "b", "c"], "stock_qty": [5, 20, 2], "reorder_point": [10, 10, 5]})
+
+
+def test_result_to_markdown_with_insights() -> None:
+    result = MultiFrameResult(
+        analysis="Top finding",
+        insights=[
+            FrameInsight(finding="A", frames=["sales"], confidence=0.9),
+            FrameInsight(finding="B", frames=["inventory"], confidence=0.8),
+        ],
+    )
+    md = result.to_markdown()
+    assert "Top finding" in md
+    assert "`sales`" in md
+    assert "`inventory`" in md
+
+
+def test_result_to_markdown_empty() -> None:
+    result = MultiFrameResult()
+    assert isinstance(result.to_markdown(), str)
+
+
+def test_result_to_dict() -> None:
+    result = MultiFrameResult(
+        action="analyze",
+        insights=[FrameInsight(finding="A", frames=["sales"], confidence=0.7)],
+    )
+    payload = result.to_dict()
+    assert payload["action"] == "analyze"
+    json.dumps(payload)
+
+
+def test_safe_eval_valid_query(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    df = frame_sales.read_fresh()
+    out = agent._safe_eval("df.nlargest(2, 'score')", df)
+    assert len(out.index) == 2
+
+
+def test_safe_eval_forbidden_import(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    with pytest.raises(ValueError, match="Forbidden pattern"):
+        agent._safe_eval("import os; df.head()", frame_sales.read_fresh())
+
+
+def test_safe_eval_forbidden_exec(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    with pytest.raises(ValueError, match="Forbidden pattern"):
+        agent._safe_eval("exec('x=1'); df", frame_sales.read_fresh())
+
+
+def test_safe_eval_must_start_with_df(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    with pytest.raises(ValueError, match="must start with 'df'"):
+        agent._safe_eval("pd.DataFrame()", frame_sales.read_fresh())
+
+
+def test_safe_eval_series_converted_to_dataframe(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    out = agent._safe_eval("df['city'].value_counts()", frame_sales.read_fresh())
+    assert isinstance(out, pd.DataFrame)
+    assert len(out.columns) == 2
+
+
+def test_schema_context_contains_shape(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    ctx = agent._build_schema_context()["sales"]
+    assert "rows" in ctx and "columns" in ctx
+
+
+def test_schema_context_contains_dtypes(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    ctx = agent._build_schema_context()["sales"]
+    assert "city" in ctx
+    assert "score" in ctx
+
+
+def test_schema_context_no_sample_rows(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    ctx = agent._build_schema_context()["sales"]
+    assert "Sample values" not in ctx
+    assert "jakarta" not in ctx.lower()
+
+
+def test_analyze_sample_single_frame(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    calls: list[list[dict[str, str]]] = []
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}'
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("analyze this", mode="sample"))
+
+    assert isinstance(result, MultiFrameResult)
+    assert result.analysis == "ok"
+    assert len(calls) == 1
+
+
+def test_analyze_sample_multi_frame(frame_sales: DFrame, frame_inventory: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales, "inventory": frame_inventory})
+    calls: list[list[dict[str, str]]] = []
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}'
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    _ = asyncio.run(agent.analyze("cross frame", mode="sample"))
+
+    assert len(calls) == 1
+    context_blob = "\n".join(msg["content"] for msg in calls[0] if msg["role"] == "system")
+    assert "DataFrame: `sales`" in context_blob
+    assert "DataFrame: `inventory`" in context_blob
+
+
+def test_analyze_sample_returns_multi_frame_result(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return '{"action":"analyze","analysis":"done","insights":[],"operations":[]}'
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="sample"))
+    assert isinstance(result, MultiFrameResult)
+
+
+def test_analyze_query_two_llm_calls(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    calls: list[list[dict[str, str]]] = []
+    responses = [
+        '{"queries":{"sales":"df.head(2)"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    _ = asyncio.run(agent.analyze("x", mode="query"))
+    assert len(calls) == 2
+
+
+def test_analyze_query_executes_generated_queries(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    calls: list[list[dict[str, str]]] = []
+    responses = [
+        '{"queries":{"sales":"df.nlargest(1, \'score\')"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    _ = asyncio.run(agent.analyze("top", mode="query"))
+
+    second_call_blob = "\n".join(msg["content"] for msg in calls[1])
+    assert "Query result: `sales`" in second_call_blob
+
+
+def test_analyze_query_unknown_frame_logged_as_error(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    responses = [
+        '{"queries":{"missing":"df.head(2)"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="query"))
+    assert "missing" in result.query_errors
+
+
+def test_analyze_query_bad_pandas_query(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    responses = [
+        '{"queries":{"sales":"df.not_existing_method()"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="query"))
+    assert "sales" in result.query_errors
+    assert result.analysis == "ok"
+
+
+def test_analyze_query_fallback_to_sample_if_no_queries(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    calls: list[list[dict[str, str]]] = []
+    responses = [
+        '{"queries":{},"reasoning":"empty"}',
+        '{"action":"analyze","analysis":"sample-fallback","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="query"))
+    assert result.analysis == "sample-fallback"
+    assert len(calls) == 2
+
+
+def test_analyze_with_output_frame(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = DFrame()
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return (
+            '{"action":"batch_enrich","analysis":"ok","insights":[],'
+            '"operations":[{"cell_id":"%s::result_0","value":"A","confidence":0.9}]}'
+            % output._frame_id
+        )
+
+    async def fake_write(operations, output_frame):
+        assert output_frame is output
+        return {"written": len(operations), "skipped": 0}
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    monkeypatch.setattr(agent, "_write_to_frame", fake_write)
+
+    result = asyncio.run(agent.analyze("x", mode="sample", output_frame=output))
+    assert result.write_result is not None
+    assert result.write_result["written"] == 1
+
+
+def test_analyze_no_output_frame(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}'
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="sample"))
+    assert result.write_result is None
+
+
+def test_unknown_provider_raises(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales}, provider="unknown")
+    with pytest.raises(ValueError, match="Unknown provider"):
+        asyncio.run(agent._call_llm([]))
+
+
+def test_empty_frames_raises() -> None:
+    with pytest.raises(ValueError, match="cannot be empty"):
+        MultiFrameAgent(frames={})
+
