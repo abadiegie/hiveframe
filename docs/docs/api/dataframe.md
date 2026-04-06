@@ -4,14 +4,16 @@
 
 `DFrame` is the main DataFrame abstraction in hiveframe, providing transactional, distributed, and AI-augmented operations on top of pandas.
 
+By default, `DFrame` runs in transactional mode. You can set `transactional=False` for single-writer, throughput-oriented pipelines.
+
 ## Key Methods
 
-- `__init__(data, schema=None, ...)` — Create a new DFrame
+- `__init__(data, schema=None, transactional=True, ...)` — Create a new DFrame
 - `from_csv(path)` — Load from CSV file
 - `from_excel(path)` — Load from Excel file
-- `await from_csv_lazy(path, chunk_size=500, ...)` — Chunked lazy CSV load (memory O(chunk_size))
-- `await from_excel_lazy(path, chunk_size=500, ...)` — Chunked lazy Excel load (openpyxl read-only)
-- `from_runtime(runtime, data, frame_id=None)` — Attach to a cluster runtime
+- `await from_csv_lazy(path, chunk_size=500, transactional=True, ...)` — Chunked lazy CSV load (memory O(chunk_size))
+- `await from_excel_lazy(path, chunk_size=500, transactional=True, ...)` — Chunked lazy Excel load (openpyxl read-only)
+- `from_runtime(runtime, data, frame_id=None, transactional=True)` — Attach to a cluster runtime
 - `read_fresh()` — Get the latest local snapshot
 - `read_fresh_global()` — Get merged snapshot from all cluster nodes
 - `read_fresh_lazy(chunk_size=1000)` — Iterate over local data in chunks
@@ -21,6 +23,12 @@
 - `cell_history(col, row_idx)` — Get audit trail for a cell
 - `get_metrics()` — Get DataFrame and cluster metrics
 - `describe_for_agent()` — Build LLM context string
+
+When `transactional=False`:
+- writes bypass lock-manager + WAL lifecycle,
+- distributed routing and global reads still work,
+- `cell_history()` returns `[]`,
+- `checkpoint()` and `rollback()` raise `RuntimeError`.
 
 ## Example
 

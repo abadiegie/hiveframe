@@ -148,6 +148,7 @@ Core principle of DFrame:
 | **Read lazy (global)** (`read_fresh_global_lazy()`) | Global merged, chunked | Entire cluster, yields DataFrame chunks |
 
 - **Write** is always sent to the local coordinator, locked at cell level, then replicated via WAL delta to read replicas. In cluster mode, writes are routed to the node that owns the partition for that row index.
+- Set `transactional=False` on `DFrame(...)` (or lazy/eager loaders) to bypass coordinator locks/WAL for throughput-oriented single-writer pipelines.
 - **`read_fresh()`** returns the local node snapshot synchronously — safe to call from anywhere including sync contexts.
 - **`read_fresh_global()`** is a sync helper for global cluster reads and internally runs `read_fresh_global_async()`.
 - **`read_fresh_global_async()`** fans out to all connected writer nodes and merges into one complete DataFrame — must be called from an async context.
@@ -437,6 +438,29 @@ cp = df.checkpoint("before_ai")
 df.rollback(cp)  # Undo to checkpoint
 ```
 
+### Non-Transactional Fast Path
+
+For single-writer ETL/pipeline workloads where speed is more important than auditability:
+
+```python
+import hiveframe as hf
+
+df = hf.DFrame(
+    {"x": [1, 2, 3]},
+    transactional=False,
+)
+
+df["x"] = [10, 20, 30]
+print(df.read_fresh())
+```
+
+Behavior in this mode:
+- writes still apply (including distributed routing when `runtime` is attached),
+- no lock-manager transaction lifecycle,
+- no WAL entries,
+- `cell_history()` returns empty list,
+- `checkpoint()` / `rollback()` are disabled.
+
 ### Cell History (Audit Trail)
 
 Query all changes for a single cell:
@@ -486,6 +510,7 @@ async def main() -> None:
     df_csv = await hf.DFrame.from_csv_lazy(
         "big.csv",
         chunk_size=1000,
+        transactional=False,
         on_progress=lambda n: print(f"csv loaded: {n}"),
     )
 
