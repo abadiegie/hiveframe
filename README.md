@@ -684,14 +684,24 @@ async def main() -> None:
     sample_result = await agent.analyze("Bandingkan performa city vs stock", mode="sample")
     print(sample_result.analysis)
 
-    # Query mode: two-phase (generate pandas queries -> execute -> analyze)
-    query_result = await agent.analyze("City mana score tinggi tapi stock rendah?", mode="query")
+    # Query mode (iterative): plan/act -> review -> optional retry -> final analysis
+    query_result = await agent.analyze(
+        "City mana score tinggi tapi stock rendah?",
+        mode="query",
+        max_retries=1,
+    )
     print(query_result.to_markdown())
+    print(query_result.total_llm_calls, query_result.final_verdict)
 
 asyncio.run(main())
 ```
 
 `MultiFrameAgent` juga bisa dipakai untuk single frame (`frames={"data": df}`) dan optional menulis hasil analisis ke `output_frame` jika plan berisi `operations`.
+
+Iterative metadata pada `MultiFrameResult`:
+- `review_history` untuk jejak verdict per attempt (`accepted|partial|error|plan|rejected|merge`)
+- `total_llm_calls` untuk observability cost/latency
+- `converged` dan `final_verdict` untuk status akhir
 
 ### Cluster mode — multiple independent DFrames on same node
 

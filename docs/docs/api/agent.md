@@ -15,19 +15,35 @@ Hiveframe agent layer has two main interfaces:
 
 ## MultiFrameAgent Key Methods
 
-- `analyze(instruction, mode="sample", output_frame=None, ...)` — Analyze one or many frames
+- `analyze(instruction, mode="sample", output_frame=None, max_retries=0, ...)` — Analyze one or many frames
 - `_safe_eval(query_str, df)` — Guarded pandas expression executor for query mode
 - `_build_schema_context()` — Build schema + numeric stats context (without sample rows)
 
 ### Analysis Modes
 
 - `sample` — one LLM call using `describe_for_agent()` context per frame
-- `query` — two LLM calls (`query generation -> execute -> analysis`)
+- `query` — iterative loop (`plan/act -> review -> optional retry -> final analysis`)
 
 In `query` mode:
 - each generated query must start with `df`
 - forbidden patterns (`import`, `exec`, `eval`, `open`, `os`, `sys`, etc.) are rejected
 - if no queries are generated, flow falls back to sample mode
+- set `max_retries > 0` to enable iterative review/retry; keep `max_retries=0` for legacy simple flow
+
+### Review Verdicts
+
+- `accepted`
+- `partial`
+- `error`
+- `plan`
+- `rejected`
+- `merge`
+
+`MultiFrameResult` also includes iterative metadata:
+- `review_history`
+- `total_llm_calls`
+- `converged`
+- `final_verdict`
 
 ### Result Types
 
