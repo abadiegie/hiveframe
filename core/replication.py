@@ -41,7 +41,7 @@ class ReplicationManager:
         self._last_lsn = 0
         self._ack_waiters: dict[int, asyncio.Future[bool]] = {}
         self._apply_entry = apply_entry
-        self._seed_chunk_handler: Callable[[str, dict[str, list[Any]], int, str], None] | None = None
+        self._seed_chunk_handler: Callable[[str, dict[str, list[Any]], int, str, bool], None] | None = None
         self._seen_chunk_offsets: dict[str, set[int]] = {}
 
     async def start(self) -> None:
@@ -146,6 +146,7 @@ class ReplicationManager:
             str(col): list(values) if isinstance(values, list) else [values]
             for col, values in raw_data.items()
         }
+        transactional = bool(message.payload.get("transactional", True))
 
         seen = self._seen_chunk_offsets.setdefault(frame_id, set())
         if row_offset in seen:
@@ -159,7 +160,7 @@ class ReplicationManager:
         seen.add(row_offset)
 
         if self._seed_chunk_handler is not None:
-            self._seed_chunk_handler(frame_id, data, row_offset, message.sender_id)
+            self._seed_chunk_handler(frame_id, data, row_offset, message.sender_id, transactional)
 
     async def _handle_sync_request(self, message: Message) -> None:
         from_lsn = int(message.payload.get("from_lsn", 0))
@@ -214,7 +215,7 @@ class ReplicationManager:
 
     def set_seed_chunk_handler(
         self,
-        handler: Callable[[str, dict[str, list[Any]], int, str], None],
+        handler: Callable[[str, dict[str, list[Any]], int, str, bool], None],
     ) -> None:
         """Register handler for distributed seed chunks received over transport."""
         self._seed_chunk_handler = handler

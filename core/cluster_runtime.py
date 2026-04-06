@@ -218,10 +218,9 @@ class ClusterRuntime:
         data: dict[str, list[Any]],
         row_offset: int,
         sender_id: str,
+        transactional: bool = True,
     ) -> None:
         """Inject a remote SEED_CHUNK payload into the local write node."""
-        from .transaction import Transaction, Operation, TxState
-
         if not data:
             return
 
@@ -240,30 +239,34 @@ class ClusterRuntime:
                 wn._df = pd.concat([wn._df, chunk_frame])
             wn._version += 1
 
-        summary_tx = Transaction(operations=[
-            Operation(
-                cell_id=f"{frame_id}::__remote_chunk__",
-                old_value=None,
-                new_value={
-                    "row_offset": row_offset,
-                    "rows": len(chunk_frame),
-                    "sender": sender_id,
-                },
-                author_type="human",
-                author_id=f"remote:{sender_id}",
-            )
-        ])
-        summary_tx.transition(TxState.VALIDATING)
-        summary_tx.transition(TxState.LOCKED)
-        summary_tx.transition(TxState.APPLYING)
-        summary_tx.transition(TxState.COMMITTED)
-        self.coordinator.wal.append(summary_tx)
+        if transactional:
+            from .transaction import Transaction, Operation, TxState
+
+            summary_tx = Transaction(operations=[
+                Operation(
+                    cell_id=f"{frame_id}::__remote_chunk__",
+                    old_value=None,
+                    new_value={
+                        "row_offset": row_offset,
+                        "rows": len(chunk_frame),
+                        "sender": sender_id,
+                    },
+                    author_type="human",
+                    author_id=f"remote:{sender_id}",
+                )
+            ])
+            summary_tx.transition(TxState.VALIDATING)
+            summary_tx.transition(TxState.LOCKED)
+            summary_tx.transition(TxState.APPLYING)
+            summary_tx.transition(TxState.COMMITTED)
+            self.coordinator.wal.append(summary_tx)
         logger.info(
-            "_inject_remote_chunk: frame=%s offset=%d rows=%d sender=%s",
+            "_inject_remote_chunk: frame=%s offset=%d rows=%d sender=%s transactional=%s",
             frame_id,
             row_offset,
             len(chunk_frame),
             sender_id,
+            transactional,
         )
 
     async def read_global_snapshot_for(self, frame_id: str) -> pd.DataFrame:

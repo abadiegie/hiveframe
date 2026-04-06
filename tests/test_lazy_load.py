@@ -133,3 +133,15 @@ def test_large_chunked_seed_wal_entries(tmp_path) -> None:
     assert all(entry.operations[0]["new_value"]["rows"] <= chunk_size for entry in wal_entries)
 
 
+def test_from_csv_lazy_non_transactional_skips_wal(tmp_path) -> None:
+    path = tmp_path / "no_tx.csv"
+    pd.DataFrame({"v": list(range(25))}).to_csv(path, index=False)
+
+    loaded = asyncio.run(
+        DFrame.from_csv_lazy(str(path), chunk_size=10, transactional=False)
+    )
+
+    assert loaded.read_fresh().shape == (25, 1)
+    assert len(loaded._coordinator.wal._entries) == 0
+
+

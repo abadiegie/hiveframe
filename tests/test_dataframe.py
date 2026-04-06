@@ -30,6 +30,30 @@ def test_write_goes_through_transaction() -> None:
     assert after == before + 1
 
 
+def test_write_non_transactional_skips_tx_and_wal() -> None:
+    df = DFrame({"a": [1]}, transactional=False)
+    before = df._coordinator.get_stats()["tx_count"]
+    before_wal = len(df._coordinator.wal._entries)
+
+    df["a"] = [2]
+
+    after = df._coordinator.get_stats()["tx_count"]
+    after_wal = len(df._coordinator.wal._entries)
+    assert after == before
+    assert after_wal == before_wal
+    assert df.read_fresh().at[0, "a"] == 2
+
+
+def test_non_transactional_disables_audit_and_rollback_features() -> None:
+    df = DFrame({"city": ["jakarta"]}, transactional=False)
+
+    assert df.cell_history("city", 0) == []
+    with pytest.raises(RuntimeError, match="checkpoint\(\) is unavailable"):
+        df.checkpoint("cp1")
+    with pytest.raises(RuntimeError, match="rollback\(\) is unavailable"):
+        df.rollback("cp1")
+
+
 def test_read_node_lag_and_read_fresh() -> None:
     df = DFrame({"name": ["Alice"]})
     df["name"] = ["Alicia"]

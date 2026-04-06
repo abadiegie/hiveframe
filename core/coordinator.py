@@ -122,6 +122,20 @@ class TransactionCoordinator:
         finally:
             self.lock_manager.release(tx.tx_id)
 
+    def submit_non_transactional(self, operations: list[Operation]) -> bool:
+        """Apply operations directly without coordinator locks/WAL bookkeeping."""
+        if not operations:
+            return True
+        tx = Transaction(operations=operations)
+        applied = self.write_node.apply(tx)
+        if not applied:
+            logger.error("Non-transactional apply failed tx_id=%s", tx.tx_id)
+            with self._stats_lock:
+                self.stats.failed_count += 1
+            return False
+        logger.debug("Non-transactional apply success tx_id=%s ops=%d", tx.tx_id, len(operations))
+        return True
+
     def read(self, cell_ids: list[str]) -> dict[str, Any]:
         """Read potentially lagging values from read node cache."""
         return self.read_node.query(cell_ids)

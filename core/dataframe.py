@@ -83,12 +83,14 @@ class DFrame:
         runtime: "ClusterRuntime | None" = None,
         frame_id: str | None = None,
         schema: dict[str, ColumnSchema] | None = None,
+        transactional: bool = True,
     ) -> None:
         import uuid as _uuid
         self._coordinator = coordinator or TransactionCoordinator()
         self._runtime = runtime
         self._frame_id = frame_id or _uuid.uuid4().hex
         self._schema = schema or {}
+        self._transactional = transactional
         # Simple short-lived cache for the local snapshot to avoid repeated builds
         # when users call multiple read properties/operators in quick succession.
         self._snapshot_cache: tuple[pd.DataFrame, float] | None = None  # (frame, ts)
@@ -102,6 +104,7 @@ class DFrame:
         runtime: "ClusterRuntime",
         data: dict[str, list[Any]] | None = None,
         frame_id: str | None = None,
+        transactional: bool = True,
     ) -> "DFrame":
         """Create a DFrame backed by an existing ClusterRuntime coordinator.
 
@@ -117,7 +120,13 @@ class DFrame:
             df_b = DFrame.from_runtime(runtime, {"product": ["apple"]})
             # df_a and df_b are isolated — no overlap
         """
-        instance = cls(data=data, coordinator=runtime.coordinator, runtime=runtime, frame_id=frame_id)
+        instance = cls(
+            data=data,
+            coordinator=runtime.coordinator,
+            runtime=runtime,
+            frame_id=frame_id,
+            transactional=transactional,
+        )
         _RuntimeRegistry.register(runtime.config.node_id, runtime)
         return instance
 
@@ -126,13 +135,14 @@ class DFrame:
         cls,
         path: str,
         schema: dict[str, ColumnSchema] | None = None,
+        transactional: bool = True,
         **kwargs,
     ) -> "DFrame":
         """Load a CSV file directly into a DFrame."""
         import pandas as pd
         df = pd.read_csv(path, **kwargs)
         data = df.to_dict(orient="list")
-        return cls(data, schema=schema)
+        return cls(data, schema=schema, transactional=transactional)
 
     @classmethod
     def from_excel(
@@ -140,13 +150,14 @@ class DFrame:
         path: str,
         sheet_name: str | int = 0,
         schema: dict[str, ColumnSchema] | None = None,
+        transactional: bool = True,
         **kwargs,
     ) -> "DFrame":
         """Load an Excel file directly into a DFrame."""
         import pandas as pd
         df = pd.read_excel(path, sheet_name=sheet_name, **kwargs)
         data = df.to_dict(orient="list")
-        return cls(data, schema=schema)
+        return cls(data, schema=schema, transactional=transactional)
 
     @classmethod
     async def from_csv_lazy(
@@ -159,11 +170,17 @@ class DFrame:
         on_progress: Callable[[int], None] | None = None,
         distribute: bool = False,
         runtime: "ClusterRuntime | None" = None,
+        transactional: bool = True,
         **kwargs,
     ) -> "DFrame":
         """Load CSV lazily using chunked reads (memory O(chunk_size))."""
         coordinator = runtime.coordinator if runtime is not None else None
-        instance = cls(schema=schema, runtime=runtime, coordinator=coordinator)
+        instance = cls(
+            schema=schema,
+            runtime=runtime,
+            coordinator=coordinator,
+            transactional=transactional,
+        )
 
         if distribute and runtime is None:
             raise ValueError("from_csv_lazy(distribute=True) requires a runtime")
@@ -215,10 +232,16 @@ class DFrame:
         on_progress: Callable[[int], None] | None = None,
         distribute: bool = False,
         runtime: "ClusterRuntime | None" = None,
+        transactional: bool = True,
     ) -> "DFrame":
         """Load Excel lazily using openpyxl read-only stream (memory O(chunk_size))."""
         coordinator = runtime.coordinator if runtime is not None else None
-        instance = cls(schema=schema, runtime=runtime, coordinator=coordinator)
+        instance = cls(
+            schema=schema,
+            runtime=runtime,
+            coordinator=coordinator,
+            transactional=transactional,
+        )
 
         if distribute and runtime is None:
             raise ValueError("from_excel_lazy(distribute=True) requires a runtime")
@@ -407,6 +430,8 @@ class DFrame:
         cols: list[str],
         extra: dict[str, Any] | None = None,
     ) -> None:
+        if not self._transactional:
+            return
         from .transaction import Transaction, Operation, TxState
 
         payload: dict[str, Any] = {
@@ -505,6 +530,7 @@ class DFrame:
                 "frame_id": self._frame_id,
                 "row_offset": row_offset,
                 "data": normalized,
+                "transactional": self._transactional,
             },
         )
         await self._runtime.transport.send(target_node_id, message)
@@ -588,22 +614,24 @@ class DFrame:
                 wn._df = pd.concat([wn._df, new_df], axis=1)
             wn._version += 1
 
-        # Single WAL entry for the entire seed
-        from .transaction import Transaction, Operation, TxState
-        summary_tx = Transaction(operations=[
-            Operation(
-                cell_id=f"{self._frame_id}::__bulk_init__",
-                old_value=None,
-                new_value={"rows": max_len, "cols": list(normalized_data.keys())},
-                author_type="human",
-                author_id="init",
-            )
-        ])
-        summary_tx.transition(TxState.VALIDATING)
-        summary_tx.transition(TxState.LOCKED)
-        summary_tx.transition(TxState.APPLYING)
-        summary_tx.transition(TxState.COMMITTED)
-        self._coordinator.wal.append(summary_tx)
+        if self._transactional:
+            # Single WAL entry for the entire seed
+            from .transaction import Transaction, Operation, TxState
+
+            summary_tx = Transaction(operations=[
+                Operation(
+                    cell_id=f"{self._frame_id}::__bulk_init__",
+                    old_value=None,
+                    new_value={"rows": max_len, "cols": list(normalized_data.keys())},
+                    author_type="human",
+                    author_id="init",
+                )
+            ])
+            summary_tx.transition(TxState.VALIDATING)
+            summary_tx.transition(TxState.LOCKED)
+            summary_tx.transition(TxState.APPLYING)
+            summary_tx.transition(TxState.COMMITTED)
+            self._coordinator.wal.append(summary_tx)
         self._invalidate_snapshot_cache()
 
     def __setitem__(self, column: str, value: Any) -> None:
@@ -656,7 +684,12 @@ class DFrame:
             if not ops:
                 continue
             coordinator = self._resolve_coordinator(node_id)
-            coordinator.submit(ops)
+            if self._transactional:
+                coordinator.submit(ops)
+            else:
+                ok = coordinator.submit_non_transactional(ops)
+                if not ok:
+                    raise RuntimeError(f"Non-transactional write failed on node '{node_id}'")
 
     def _resolve_coordinator(self, node_id: str) -> "TransactionCoordinator":
         """Resolve coordinator for a given node_id.
@@ -969,6 +1002,8 @@ class DFrame:
         Save the current state as a checkpoint.
         Returns a checkpoint_id that can be used for rollback.
         """
+        if not self._transactional:
+            raise RuntimeError("checkpoint() is unavailable when transactional=False")
         import time
         if not hasattr(self, '_checkpoints'):
             self._checkpoints = {}
@@ -986,6 +1021,8 @@ class DFrame:
         Restore data to the state when the checkpoint was created.
         All changes after the checkpoint are undone.
         """
+        if not self._transactional:
+            raise RuntimeError("rollback() is unavailable when transactional=False")
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
         snapshot = self._checkpoints[checkpoint_id]["snapshot"]
@@ -1020,6 +1057,8 @@ class DFrame:
         })
 
     def cell_history(self, col: str, row_idx: int) -> list[dict]:
+        if not self._transactional:
+            return []
         cell_id = self._cell_id(col, row_idx)
         return self._coordinator.wal.get_cell_history(cell_id)
 
@@ -1049,6 +1088,7 @@ def read(
     name: str,
     coordinator: TransactionCoordinator | None = None,
     schema: dict[str, ColumnSchema] | None = None,
+    transactional: bool = True,
 ) -> DFrame:
     """Load persisted dataframe from parquet into a new DFrame instance.
 
@@ -1060,4 +1100,9 @@ def read(
     frame = pd.read_parquet(parquet_path)
     resolved_schema = schema or _load_schema_sidecar(parquet_path)
     data = frame.to_dict(orient="list")
-    return DFrame(data=data, coordinator=resolved_coordinator, schema=resolved_schema)
+    return DFrame(
+        data=data,
+        coordinator=resolved_coordinator,
+        schema=resolved_schema,
+        transactional=transactional,
+    )

@@ -212,6 +212,61 @@ def test_from_csv_lazy_distribute_true_two_nodes(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_from_csv_lazy_distribute_true_non_transactional_skips_wal(tmp_path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "dist.no-tx.db"
+        csv_path = tmp_path / "dist.no-tx.csv"
+        pd.DataFrame({"x": list(range(12))}).to_csv(csv_path, index=False)
+
+        runtime_a = ClusterRuntime(
+            RuntimeConfig(
+                node_id="csvdist-no-tx-a",
+                role="write",
+                host="127.0.0.1",
+                port=19632,
+                enable_cluster=True,
+                registry_backend="sqlite",
+                transport_backend="tcp",
+                db_path=str(db_path),
+            )
+        )
+        runtime_b = ClusterRuntime(
+            RuntimeConfig(
+                node_id="csvdist-no-tx-b",
+                role="write",
+                host="127.0.0.1",
+                port=19633,
+                enable_cluster=True,
+                registry_backend="sqlite",
+                transport_backend="tcp",
+                db_path=str(db_path),
+            )
+        )
+
+        await runtime_a.start()
+        await runtime_b.start()
+        try:
+            df = await DFrame.from_csv_lazy(
+                str(csv_path),
+                chunk_size=3,
+                runtime=runtime_a,
+                distribute=True,
+                transactional=False,
+            )
+            await asyncio.sleep(0.05)
+
+            a_frame = runtime_a._build_frame_snapshot(df._frame_id)
+            b_frame = runtime_b._build_frame_snapshot(df._frame_id)
+            assert len(a_frame.index) + len(b_frame.index) == 12
+            assert len(runtime_a.coordinator.wal._entries) == 0
+            assert len(runtime_b.coordinator.wal._entries) == 0
+        finally:
+            await _shutdown_runtime(runtime_a)
+            await _shutdown_runtime(runtime_b)
+
+    asyncio.run(run())
+
+
 def test_remote_chunk_injection_via_seed_chunk_message(tmp_path) -> None:
     async def run() -> None:
         db_path = tmp_path / "seed-msg.db"
