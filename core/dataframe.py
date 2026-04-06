@@ -486,14 +486,31 @@ class DFrame:
         """Seed data incrementally from chunk iterable (memory O(chunk_size))."""
         total = 0
         for chunk_df in chunks:
-            if chunk_df.empty:
-                continue
-            rows = self._seed_chunk_local(chunk_df, total, wal_cell_id="__bulk_chunk__")
-            total += rows
-            if on_progress:
-                on_progress(total)
+            total = self._seed_chunk_step(
+                chunk_df,
+                total,
+                wal_cell_id="__bulk_chunk__",
+                on_progress=on_progress,
+            )
         self._invalidate_snapshot_cache()
         return total
+
+    def _seed_chunk_step(
+        self,
+        chunk_df: pd.DataFrame,
+        total: int,
+        *,
+        wal_cell_id: str,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Apply one seed chunk and return updated total row count."""
+        if chunk_df.empty:
+            return total
+        rows = self._seed_chunk_local(chunk_df, total, wal_cell_id=wal_cell_id)
+        updated_total = total + rows
+        if on_progress:
+            on_progress(updated_total)
+        return updated_total
 
     async def _send_chunk_to_node(
         self,
@@ -555,12 +572,12 @@ class DFrame:
             )
             total = 0
             async for chunk_df in chunks:
-                if chunk_df.empty:
-                    continue
-                rows = self._seed_chunk_local(chunk_df, total, wal_cell_id="__bulk_chunk__")
-                total += rows
-                if on_progress:
-                    on_progress(total)
+                total = self._seed_chunk_step(
+                    chunk_df,
+                    total,
+                    wal_cell_id="__bulk_chunk__",
+                    on_progress=on_progress,
+                )
             self._invalidate_snapshot_cache()
             return total
 
