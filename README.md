@@ -85,6 +85,8 @@ core/
 └── cluster_runtime.py  # Runtime wiring + global snapshot fan-out + merge + rebalance
 agent/
 ├── writer.py           # Async LLM agent writer with retry/backoff
+├── multi_agent.py      # Multi-frame analysis agent (sample/query mode)
+├── result.py           # Multi-frame analysis result dataclasses
 └── prompt.py           # Structured prompt builder + JSON plan parser
 ```
 
@@ -664,6 +666,32 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Standalone — MultiFrameAgent (analysis)
+
+```python
+import asyncio
+import hiveframe as hf
+from hiveframe.agent import MultiFrameAgent
+
+async def main() -> None:
+    sales = hf.DFrame({"city": ["jakarta", "bandung", "jakarta"], "score": [90, 80, 70]})
+    inventory = hf.DFrame({"city": ["jakarta", "bandung"], "stock": [12, 4]})
+
+    agent = MultiFrameAgent(frames={"sales": sales, "inventory": inventory})
+
+    # Sample mode: single LLM call using describe_for_agent() contexts
+    sample_result = await agent.analyze("Bandingkan performa city vs stock", mode="sample")
+    print(sample_result.analysis)
+
+    # Query mode: two-phase (generate pandas queries -> execute -> analyze)
+    query_result = await agent.analyze("City mana score tinggi tapi stock rendah?", mode="query")
+    print(query_result.to_markdown())
+
+asyncio.run(main())
+```
+
+`MultiFrameAgent` juga bisa dipakai untuk single frame (`frames={"data": df}`) dan optional menulis hasil analisis ke `output_frame` jika plan berisi `operations`.
 
 ### Cluster mode — multiple independent DFrames on same node
 
