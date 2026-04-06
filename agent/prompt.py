@@ -176,6 +176,89 @@ QUERY_GEN_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
 ]
 
 
+REVIEW_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
+    {
+        "role": "user",
+        "content": (
+            "Instruction: Produk mana yang sales tinggi tapi stok menipis?\n"
+            "Results:\n"
+            "sales: top 20 products by qty_sold OK\n"
+            "inventory: ERROR - column 'stock_qty' not found"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"status":"partial",'
+            '"reason":"Sales data is complete but inventory query failed",'
+            '"reflection":"inventory query used wrong column name. '
+            'Use stock_remaining instead of stock_qty",'
+            '"missing_parts":["inventory stock data"],'
+            '"suggested_queries":{"inventory":"df.nsmallest(50, '
+            '\'stock_remaining\')[[\'product_id\',\'stock_remaining\']]"},'
+            '"accepted_labels":["sales"],'
+            '"needs_columns":[],'
+            '"merge_ready":false}'
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "Instruction: Bandingkan revenue Q1 vs Q2 per region\n"
+            "Results:\n"
+            "sales_q1: revenue per region OK\n"
+            "sales_q2: revenue per region OK"
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"status":"merge",'
+            '"reason":"Both quarters data is available and sufficient",'
+            '"reflection":"",'
+            '"missing_parts":[],'
+            '"suggested_queries":{},'
+            '"accepted_labels":["sales_q1","sales_q2"],'
+            '"needs_columns":[],'
+            '"merge_ready":true}'
+        ),
+    },
+]
+
+
+_REVIEW_SYSTEM_PROMPT = (
+    "You are evaluating query results to determine if they are "
+    "sufficient to answer the original instruction.\n\n"
+    "## Verdict options\n\n"
+    "accepted  -> Results fully answer the instruction. Proceed to analysis.\n"
+    "partial   -> Some results are useful, but specific parts are missing. "
+    "Declare which frame labels are already accepted and what additional queries are needed.\n"
+    "error     -> One or more queries failed technically. Suggest corrected queries.\n"
+    "plan      -> Results are insufficient because you need columns not yet visible in the schema. "
+    "List the column names you need.\n"
+    "rejected  -> Results are not relevant to the instruction. The query approach was wrong. "
+    "Suggest a completely different approach.\n"
+    "merge     -> You have sufficient partial results across multiple queries "
+    "that can be combined to answer the instruction.\n\n"
+    "## Rules\n\n"
+    "- Be specific about what is missing or wrong\n"
+    "- For 'partial': always list accepted_labels so accepted parts are not re-queried\n"
+    "- For 'plan': only request columns from frames that already exist in the frames dict\n"
+    "- For 'suggested_queries': start each query with 'df'\n"
+    "- Prefer 'partial' or 'merge' over 'rejected' when some data is useful\n\n"
+    "## Response format\n\n"
+    "Raw JSON only:\n"
+    '{"status":"accepted|partial|error|plan|rejected|merge",'
+    '"reason":"brief explanation",'
+    '"reflection":"what to fix (empty if accepted)",'
+    '"missing_parts":["description of what is missing"],'
+    '"suggested_queries":{"frame_label":"df_expression"},'
+    '"accepted_labels":["frame_labels_already_ok"],'
+    '"needs_columns":["col_name_1","col_name_2"],'
+    '"merge_ready":false}'
+)
+
+
 def build_multi_frame_messages(
     instruction: str,
     frame_contexts: dict[str, str],
@@ -226,6 +309,8 @@ def build_multi_frame_messages(
 def build_query_generation_messages(
     instruction: str,
     frame_schemas: dict[str, str],
+    reflection: str = "",
+    iteration: int = 0,
 ) -> list[dict[str, str]]:
     """Build messages untuk fase 1 query mode."""
     system = (
@@ -258,8 +343,70 @@ def build_query_generation_messages(
     if schema_parts:
         messages.append({"role": "system", "content": "\n\n---\n\n".join(schema_parts)})
 
+    if reflection and iteration > 0:
+        messages.append({
+            "role": "system",
+            "content": (
+                f"## Reflection from previous attempt (attempt {iteration})\n\n"
+                f"{reflection}\n\n"
+                "Generate different queries based on this reflection. "
+                "Do not repeat the same approach that failed."
+            ),
+        })
+
     messages.extend(QUERY_GEN_FEW_SHOT_EXAMPLES)
     messages.append({"role": "user", "content": instruction})
+    return messages
+
+
+def build_review_messages(
+    instruction: str,
+    queries_executed: dict[str, str],
+    query_results: dict[str, str],
+    query_errors: dict[str, str],
+    iteration: int = 0,
+    previous_verdicts: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Build messages untuk Review phase."""
+    messages: list[dict[str, str]] = [{"role": "system", "content": _REVIEW_SYSTEM_PROMPT}]
+
+    parts = [
+        f"## Original instruction\n\n{instruction}",
+        f"\n## Iteration {iteration + 1}",
+    ]
+
+    if previous_verdicts:
+        history_lines: list[str] = []
+        for idx, verdict in enumerate(previous_verdicts, 1):
+            history_lines.append(
+                f"  Attempt {idx}: {verdict.get('status', '?')} - {verdict.get('reason', '')}"
+            )
+        parts.append("\n## Previous attempts\n" + "\n".join(history_lines))
+
+    if queries_executed:
+        parts.append("\n## Queries executed")
+        for label, query in queries_executed.items():
+            parts.append(f"**{label}:** `{query}`")
+
+    if query_results:
+        parts.append("\n## Query results")
+        for label, result_str in query_results.items():
+            parts.append(f"**{label}:**\n```\n{result_str}\n```")
+
+    if query_errors:
+        parts.append("\n## Query errors")
+        for label, error in query_errors.items():
+            parts.append(f"- `{label}`: {error}")
+
+    messages.append({"role": "system", "content": "\n\n".join(parts)})
+    messages.extend(REVIEW_FEW_SHOT_EXAMPLES)
+    messages.append({
+        "role": "user",
+        "content": (
+            "Evaluate the results above. Are they sufficient to answer "
+            "the instruction? Provide your verdict."
+        ),
+    })
     return messages
 
 

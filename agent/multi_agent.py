@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from .prompt import parse_plan
-from .result import FrameInsight, MultiFrameResult
+from .result import FrameInsight, MultiFrameResult, ReviewVerdict
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -120,13 +121,21 @@ class MultiFrameAgent:
         max_sample_rows: int = 50,
         max_result_rows: int = 200,
         output_frame: "DFrame | None" = None,
+        max_retries: int = 0,
     ) -> MultiFrameResult:
         """Jalankan analisis LLM terhadap satu atau banyak frame."""
         if mode not in ("sample", "query"):
             raise ValueError("mode must be 'sample' or 'query'")
 
         if mode == "query":
-            result = await self._analyze_query_mode(instruction, max_result_rows)
+            if max_retries > 0:
+                result = await self._analyze_query_mode_iterative(
+                    instruction,
+                    max_result_rows,
+                    max_retries,
+                )
+            else:
+                result = await self._analyze_query_mode_simple(instruction, max_result_rows)
         else:
             result = await self._analyze_sample_mode(instruction, max_sample_rows)
 
@@ -158,6 +167,10 @@ class MultiFrameAgent:
         return self._plan_to_result(plan)
 
     async def _analyze_query_mode(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
+        """Backward-compatible alias for direct callers."""
+        return await self._analyze_query_mode_simple(instruction, max_result_rows)
+
+    async def _analyze_query_mode_simple(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
         from .prompt import build_analysis_messages, build_query_generation_messages
 
         schema_contexts = self._build_schema_context()
@@ -205,6 +218,210 @@ class MultiFrameAgent:
         result = self._plan_to_result(analysis_plan)
         result.queries_executed = {k: str(v) for k, v in pandas_queries.items()}
         result.query_errors = query_errors
+        return result
+
+    async def _analyze_query_mode_iterative(
+        self,
+        instruction: str,
+        max_result_rows: int,
+        max_retries: int,
+    ) -> MultiFrameResult:
+        """Iterative query mode dengan review+retry loop."""
+        from .prompt import (
+            build_analysis_messages,
+            build_query_generation_messages,
+            build_review_messages,
+        )
+
+        schema_contexts = self._build_schema_context()
+
+        accumulated_results: dict[str, str] = {}
+        accumulated_queries: dict[str, str] = {}
+        accumulated_errors: dict[str, str] = {}
+        review_history: list[ReviewVerdict] = []
+        total_llm_calls = 0
+        reflection = ""
+        extra_schema: dict[str, str] = {}
+        started_at = time.perf_counter()
+        skip_labels: set[str] = set()
+        only_labels: set[str] | None = None
+
+        for attempt in range(max_retries + 1):
+            logger.info(
+                "MultiFrameAgent attempt %d/%d instruction=%r",
+                attempt + 1,
+                max_retries + 1,
+                instruction[:60],
+            )
+
+            current_schema = {**schema_contexts, **extra_schema}
+            query_messages = build_query_generation_messages(
+                instruction=instruction,
+                frame_schemas=current_schema,
+                reflection=reflection,
+                iteration=attempt,
+            )
+            raw_queries = await self._call_llm(query_messages)
+            total_llm_calls += 1
+
+            query_plan = parse_plan(raw_queries)
+            new_queries = query_plan.get("queries", {})
+
+            if isinstance(new_queries, dict):
+                new_queries = {k: str(v) for k, v in new_queries.items()}
+                if only_labels is not None:
+                    new_queries = {k: v for k, v in new_queries.items() if k in only_labels}
+                if skip_labels:
+                    new_queries = {k: v for k, v in new_queries.items() if k not in skip_labels}
+
+            if not isinstance(new_queries, dict) or not new_queries:
+                logger.warning(
+                    "No queries generated at attempt %d, falling back to sample mode",
+                    attempt + 1,
+                )
+                result = await self._analyze_sample_mode(instruction, 50)
+                result.total_llm_calls = total_llm_calls + 1
+                result.converged = False
+                result.final_verdict = "fallback"
+                return result
+
+            new_results: dict[str, str] = {}
+            new_errors: dict[str, str] = {}
+            for label, query_str in new_queries.items():
+                frame = self._frames.get(label)
+                if frame is None:
+                    new_errors[label] = f"Frame '{label}' not found"
+                    continue
+                try:
+                    fresh = frame.read_fresh()
+                    result_df = self._safe_eval(str(query_str), fresh)
+                    new_results[label] = result_df.head(max_result_rows).to_string()
+                    logger.info("Query OK: frame=%s rows=%d", label, len(result_df.head(max_result_rows)))
+                except Exception as exc:
+                    new_errors[label] = str(exc)
+                    logger.warning("Query failed: frame=%s error=%s", label, exc)
+
+            accumulated_queries.update({k: str(v) for k, v in new_queries.items()})
+            accumulated_results.update(new_results)
+            accumulated_errors.update(new_errors)
+
+            review_messages = build_review_messages(
+                instruction=instruction,
+                queries_executed=accumulated_queries,
+                query_results=accumulated_results,
+                query_errors=accumulated_errors,
+                iteration=attempt,
+                previous_verdicts=[{"status": v.status, "reason": v.reason} for v in review_history],
+            )
+            raw_review = await self._call_llm(review_messages)
+            total_llm_calls += 1
+            verdict_dict = parse_plan(raw_review)
+
+            # Legacy compatibility: older callers/tests may return final analysis JSON
+            # directly in the second call without a review verdict payload.
+            if "status" not in verdict_dict and (
+                "analysis" in verdict_dict or "action" in verdict_dict
+            ):
+                legacy_result = self._plan_to_result(verdict_dict)
+                legacy_result.queries_executed = dict(accumulated_queries)
+                legacy_result.query_errors = dict(accumulated_errors)
+                legacy_result.total_llm_calls = total_llm_calls
+                legacy_result.converged = True
+                legacy_result.final_verdict = "accepted"
+                return legacy_result
+
+            verdict = ReviewVerdict(
+                status=str(verdict_dict.get("status", "rejected")),
+                reason=str(verdict_dict.get("reason", "")),
+                reflection=str(verdict_dict.get("reflection", "")),
+                missing_parts=list(verdict_dict.get("missing_parts", [])),
+                suggested_queries={k: str(v) for k, v in dict(verdict_dict.get("suggested_queries", {})).items()},
+                accepted_labels=list(verdict_dict.get("accepted_labels", [])),
+                needs_columns=list(verdict_dict.get("needs_columns", [])),
+                merge_ready=bool(verdict_dict.get("merge_ready", False)),
+            )
+            review_history.append(verdict)
+
+            if verdict.status == "accepted":
+                break
+            if verdict.status == "merge" or verdict.merge_ready:
+                break
+            if attempt >= max_retries:
+                logger.warning("Max retries (%d) reached, proceeding with accumulated results", max_retries)
+                break
+
+            if verdict.status == "partial":
+                reflection = verdict.reflection
+                skip_labels = set(verdict.accepted_labels)
+                only_labels = set(verdict.suggested_queries.keys()) if verdict.suggested_queries else None
+            elif verdict.status == "error":
+                failed_labels = list(accumulated_errors.keys())
+                retry_labels = [label for label in verdict.suggested_queries if label in failed_labels]
+                for label in retry_labels:
+                    accumulated_errors.pop(label, None)
+                    accumulated_results.pop(label, None)
+                reflection = verdict.reflection
+                skip_labels = set()
+                if retry_labels:
+                    only_labels = set(retry_labels)
+                else:
+                    only_labels = set(failed_labels) if failed_labels else None
+            elif verdict.status == "plan":
+                for label, frame in self._frames.items():
+                    try:
+                        fresh = frame.read_fresh()
+                    except Exception:
+                        continue
+                    needed = [column for column in verdict.needs_columns if column in fresh.columns]
+                    if not needed:
+                        continue
+                    shape_line = f"shape: {len(fresh):,} rows x {len(fresh.columns)} columns"
+                    dtypes_lines = [
+                        f"  {column}: {fresh.dtypes[column]}"
+                        for column in needed
+                    ]
+                    extra_schema[label] = (
+                        "Additional columns available:\n"
+                        f"{shape_line}\n"
+                        "Columns:\n"
+                        + "\n".join(dtypes_lines)
+                    )
+                reflection = verdict.reflection
+                skip_labels = set()
+                only_labels = None
+            elif verdict.status == "rejected":
+                accumulated_results.clear()
+                accumulated_queries.clear()
+                accumulated_errors.clear()
+                reflection = verdict.reflection
+                skip_labels = set()
+                only_labels = None
+
+        final_messages = build_analysis_messages(
+            instruction=instruction,
+            query_results=accumulated_results,
+            query_errors=accumulated_errors,
+            original_queries=accumulated_queries,
+        )
+        raw_analysis = await self._call_llm(final_messages)
+        total_llm_calls += 1
+        analysis_plan = parse_plan(raw_analysis)
+        result = self._plan_to_result(analysis_plan)
+        result.queries_executed = dict(accumulated_queries)
+        result.query_errors = dict(accumulated_errors)
+        result.review_history = review_history
+        result.total_llm_calls = total_llm_calls
+        result.converged = bool(review_history) and review_history[-1].status in ("accepted", "merge")
+        result.final_verdict = review_history[-1].status if review_history else "unknown"
+
+        logger.info(
+            "MultiFrameAgent done: verdict=%s converged=%s llm_calls=%d attempts=%d elapsed_ms=%.2f",
+            result.final_verdict,
+            result.converged,
+            total_llm_calls,
+            len(review_history),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
         return result
 
     def _safe_eval(self, query_str: str, df: "pd.DataFrame") -> "pd.DataFrame":
