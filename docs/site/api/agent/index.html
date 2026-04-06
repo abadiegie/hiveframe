@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#agentwriter-api" class="md-skip">
+        <a href="#agent-api" class="md-skip">
           Skip to content
         </a>
       
@@ -690,13 +690,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#key-methods" class="md-nav__link">
+  <a href="#agentwriter-key-methods" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Key Methods
+        AgentWriter Key Methods
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multiframeagent-key-methods" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiFrameAgent Key Methods
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MultiFrameAgent Key Methods">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#analysis-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Analysis Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -705,6 +744,17 @@
     <span class="md-ellipsis">
       
         Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multiframeagent-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiFrameAgent Example
       
     </span>
   </a>
@@ -793,13 +843,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#key-methods" class="md-nav__link">
+  <a href="#agentwriter-key-methods" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Key Methods
+        AgentWriter Key Methods
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multiframeagent-key-methods" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiFrameAgent Key Methods
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MultiFrameAgent Key Methods">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#analysis-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Analysis Modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result Types
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -808,6 +897,17 @@
     <span class="md-ellipsis">
       
         Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multiframeagent-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MultiFrameAgent Example
       
     </span>
   </a>
@@ -834,20 +934,61 @@
   
 
 
-<h1 id="agentwriter-api">AgentWriter API</h1>
+<h1 id="agent-api">Agent API</h1>
 <h2 id="overview">Overview</h2>
-<p><code>AgentWriter</code> enables LLM or programmatic agents to write to a DFrame with confidence scoring, batch enrichment, and normalization.</p>
-<h2 id="key-methods">Key Methods</h2>
+<p>Hiveframe agent layer has two main interfaces:</p>
+<ul>
+<li><code>AgentWriter</code> for transactional writes into a single <code>DFrame</code></li>
+<li><code>MultiFrameAgent</code> for analysis across one or many <code>DFrame</code> objects (sample/query mode)</li>
+</ul>
+<h2 id="agentwriter-key-methods">AgentWriter Key Methods</h2>
 <ul>
 <li><code>normalize(cell_id, value, confidence)</code> — Write a single cell with confidence</li>
 <li><code>batch_enrich(operations)</code> — Write a batch of cell updates</li>
 <li><code>stream_normalize(column, llm_call, chunk_size=50)</code> — Normalize a column in streaming chunks</li>
 </ul>
+<h2 id="multiframeagent-key-methods">MultiFrameAgent Key Methods</h2>
+<ul>
+<li><code>analyze(instruction, mode="sample", output_frame=None, ...)</code> — Analyze one or many frames</li>
+<li><code>_safe_eval(query_str, df)</code> — Guarded pandas expression executor for query mode</li>
+<li><code>_build_schema_context()</code> — Build schema + numeric stats context (without sample rows)</li>
+</ul>
+<h3 id="analysis-modes">Analysis Modes</h3>
+<ul>
+<li><code>sample</code> — one LLM call using <code>describe_for_agent()</code> context per frame</li>
+<li><code>query</code> — two LLM calls (<code>query generation -&gt; execute -&gt; analysis</code>)</li>
+</ul>
+<p>In <code>query</code> mode:
+- each generated query must start with <code>df</code>
+- forbidden patterns (<code>import</code>, <code>exec</code>, <code>eval</code>, <code>open</code>, <code>os</code>, <code>sys</code>, etc.) are rejected
+- if no queries are generated, flow falls back to sample mode</p>
+<h3 id="result-types">Result Types</h3>
+<ul>
+<li><code>MultiFrameResult</code></li>
+<li><code>FrameInsight</code></li>
+</ul>
+<p>Both are exported from <code>hiveframe.agent</code>.</p>
 <h2 id="example">Example</h2>
 <pre><code class="language-python">from hiveframe.agent.writer import AgentWriter
 
 writer = AgentWriter(df._coordinator, agent_id=&quot;normalizer&quot;, author_type=&quot;llm_normalization&quot;)
 await writer.normalize(f&quot;{df._frame_id}::city_0&quot;, &quot;DKI Jakarta&quot;, confidence=0.97)
+</code></pre>
+<h2 id="multiframeagent-example">MultiFrameAgent Example</h2>
+<pre><code class="language-python">import asyncio
+import hiveframe as hf
+from hiveframe.agent import MultiFrameAgent
+
+async def main() -&gt; None:
+    sales = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;, &quot;bandung&quot;, &quot;jakarta&quot;], &quot;score&quot;: [90, 80, 70]})
+    inventory = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;, &quot;bandung&quot;], &quot;stock&quot;: [12, 4]})
+
+    agent = MultiFrameAgent(frames={&quot;sales&quot;: sales, &quot;inventory&quot;: inventory})
+    result = await agent.analyze(&quot;City mana score tinggi tapi stock rendah?&quot;, mode=&quot;query&quot;)
+    print(result.analysis)
+    print(result.to_markdown())
+
+asyncio.run(main())
 </code></pre>
 
 

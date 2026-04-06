@@ -673,6 +673,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#non-transactional-fast-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-Transactional Fast Path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#cell-history-audit-trail" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -771,6 +782,17 @@
     <span class="md-ellipsis">
       
         Standalone — LLM Agent writer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#standalone-multiframeagent-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone — MultiFrameAgent (analysis)
       
     </span>
   </a>
@@ -1546,6 +1568,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#non-transactional-fast-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-Transactional Fast Path
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#cell-history-audit-trail" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1644,6 +1677,17 @@
     <span class="md-ellipsis">
       
         Standalone — LLM Agent writer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#standalone-multiframeagent-analysis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone — MultiFrameAgent (analysis)
       
     </span>
   </a>
@@ -1930,6 +1974,8 @@ Transactional, distributed-ready pandas-compatible DataFrame engine.</p>
 └── cluster_runtime.py  # Runtime wiring + global snapshot fan-out + merge + rebalance
 agent/
 ├── writer.py           # Async LLM agent writer with retry/backoff
+├── multi_agent.py      # Multi-frame analysis agent (sample/query mode)
+├── result.py           # Multi-frame analysis result dataclasses
 └── prompt.py           # Structured prompt builder + JSON plan parser
 </code></pre>
 <hr />
@@ -2012,6 +2058,7 @@ print(df.head())
 <li><strong><code>read_fresh_global_lazy()</code></strong> yields DataFrame chunks (default 1000 rows per chunk) from the global merged snapshot (all cluster nodes). Only available in sync context; raises if called in an event loop.</li>
 <li>If an event loop is already running, <code>read_fresh_global()</code> raises and you should use <code>await read_fresh_global_async()</code> directly.</li>
 <li>In <strong>standalone</strong> mode (no cluster), both methods behave identically and read from the local node.</li>
+<li>In <code>transactional=False</code> mode, reads still come from writer snapshots directly. This is the intended simple distributed mode; WAL-backed read-replica sync is not provided there.</li>
 </ul>
 <hr />
 <h2 id="modes">Modes</h2>
@@ -2363,6 +2410,26 @@ wal.compact_before_lsn(lsn=5000)
 # ... modify data ...
 df.rollback(cp)  # Undo to checkpoint
 </code></pre>
+<h3 id="non-transactional-fast-path">Non-Transactional Fast Path</h3>
+<p>For single-writer ETL/pipeline workloads where speed is more important than auditability:</p>
+<pre><code class="language-python">import hiveframe as hf
+
+df = hf.DFrame(
+    {&quot;x&quot;: [1, 2, 3]},
+    transactional=False,
+)
+
+df[&quot;x&quot;] = [10, 20, 30]
+print(df.read_fresh())
+</code></pre>
+<p>Behavior in this mode:
+- writes still apply (including distributed routing when <code>runtime</code> is attached),
+- <code>read_fresh()</code> and <code>read_fresh_global_async()</code> read directly from writer snapshots,
+- no lock-manager transaction lifecycle,
+- no WAL entries,
+- no WAL-backed read-replica sync,
+- <code>cell_history()</code> returns empty list,
+- <code>checkpoint()</code> / <code>rollback()</code> are disabled.</p>
 <h3 id="cell-history-audit-trail">Cell History (Audit Trail)</h3>
 <p>Query all changes for a single cell:</p>
 <pre><code class="language-python">history = df.cell_history(&quot;city&quot;, 0)
@@ -2491,6 +2558,26 @@ async def main():
 
 asyncio.run(main())
 </code></pre>
+<h3 id="standalone-multiframeagent-analysis">Standalone — MultiFrameAgent (analysis)</h3>
+<pre><code class="language-python">import asyncio
+import hiveframe as hf
+from hiveframe.agent import MultiFrameAgent
+
+async def main() -&gt; None:
+    sales = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;, &quot;bandung&quot;, &quot;jakarta&quot;], &quot;score&quot;: [90, 80, 70]})
+    inventory = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;, &quot;bandung&quot;], &quot;stock&quot;: [12, 4]})
+
+    agent = MultiFrameAgent(frames={&quot;sales&quot;: sales, &quot;inventory&quot;: inventory})
+
+    sample_result = await agent.analyze(&quot;Bandingkan performa city vs stock&quot;, mode=&quot;sample&quot;)
+    print(sample_result.analysis)
+
+    query_result = await agent.analyze(&quot;City mana score tinggi tapi stock rendah?&quot;, mode=&quot;query&quot;)
+    print(query_result.to_markdown())
+
+asyncio.run(main())
+</code></pre>
+<p><code>MultiFrameAgent</code> juga dapat dipakai untuk satu frame (<code>frames={"data": df}</code>) dan optional menulis hasil ke <code>output_frame</code> saat response menyertakan <code>operations</code>.</p>
 <h3 id="cluster-mode-multiple-independent-dframes-on-same-node">Cluster mode — multiple independent DFrames on same node</h3>
 <pre><code class="language-python">import asyncio
 import hiveframe as hf

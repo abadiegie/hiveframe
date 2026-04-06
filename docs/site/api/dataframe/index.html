@@ -683,6 +683,28 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#lazy-load-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lazy Load Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#distributed-lazy-seed-cluster" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Distributed Lazy Seed (Cluster)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -814,6 +836,28 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#lazy-load-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lazy Load Example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#distributed-lazy-seed-cluster" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Distributed Lazy Seed (Cluster)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -837,12 +881,15 @@
 <h1 id="dframe-api">DFrame API</h1>
 <h2 id="overview">Overview</h2>
 <p><code>DFrame</code> is the main DataFrame abstraction in hiveframe, providing transactional, distributed, and AI-augmented operations on top of pandas.</p>
+<p>By default, <code>DFrame</code> runs in transactional mode. You can set <code>transactional=False</code> for single-writer, throughput-oriented pipelines.</p>
 <h2 id="key-methods">Key Methods</h2>
 <ul>
-<li><code>__init__(data, schema=None, ...)</code> — Create a new DFrame</li>
+<li><code>__init__(data, schema=None, transactional=True, ...)</code> — Create a new DFrame</li>
 <li><code>from_csv(path)</code> — Load from CSV file</li>
 <li><code>from_excel(path)</code> — Load from Excel file</li>
-<li><code>from_runtime(runtime, data, frame_id=None)</code> — Attach to a cluster runtime</li>
+<li><code>await from_csv_lazy(path, chunk_size=500, transactional=True, ...)</code> — Chunked lazy CSV load (memory O(chunk_size))</li>
+<li><code>await from_excel_lazy(path, chunk_size=500, transactional=True, ...)</code> — Chunked lazy Excel load (openpyxl read-only)</li>
+<li><code>from_runtime(runtime, data, frame_id=None, transactional=True)</code> — Attach to a cluster runtime</li>
 <li><code>read_fresh()</code> — Get the latest local snapshot</li>
 <li><code>read_fresh_global()</code> — Get merged snapshot from all cluster nodes</li>
 <li><code>read_fresh_lazy(chunk_size=1000)</code> — Iterate over local data in chunks</li>
@@ -853,6 +900,13 @@
 <li><code>get_metrics()</code> — Get DataFrame and cluster metrics</li>
 <li><code>describe_for_agent()</code> — Build LLM context string</li>
 </ul>
+<p>When <code>transactional=False</code>:
+- writes bypass lock-manager + WAL lifecycle,
+- distributed routing and global reads still work,
+- reads come from writer snapshots directly,
+- read-replica sync is not provided,
+- <code>cell_history()</code> returns <code>[]</code>,
+- <code>checkpoint()</code> and <code>rollback()</code> raise <code>RuntimeError</code>.</p>
 <h2 id="example">Example</h2>
 <pre><code class="language-python">import hiveframe as hf
 
@@ -860,6 +914,46 @@ df = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;]})
 df[&quot;city&quot;] = [&quot;DKI Jakarta&quot;]
 print(df.read_fresh())
 </code></pre>
+<h2 id="lazy-load-example">Lazy Load Example</h2>
+<pre><code class="language-python">import asyncio
+import hiveframe as hf
+
+async def main() -&gt; None:
+    df = await hf.DFrame.from_csv_lazy(
+        &quot;large.csv&quot;,
+        chunk_size=1000,
+        on_progress=lambda n: print(f&quot;loaded {n} rows&quot;),
+    )
+    print(df.shape)
+
+asyncio.run(main())
+</code></pre>
+<h2 id="distributed-lazy-seed-cluster">Distributed Lazy Seed (Cluster)</h2>
+<pre><code class="language-python">import asyncio
+import hiveframe as hf
+from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig
+
+async def main() -&gt; None:
+    runtime = ClusterRuntime(
+        RuntimeConfig(node_id=&quot;w1&quot;, role=&quot;write&quot;, enable_cluster=True)
+    )
+    await runtime.start()
+
+    df = await hf.DFrame.from_csv_lazy(
+        &quot;large.csv&quot;,
+        chunk_size=1000,
+        runtime=runtime,
+        distribute=True,
+    )
+    print(await df.read_fresh_async())
+
+asyncio.run(main())
+</code></pre>
+<p>Notes:
+- <code>distribute=False</code> is default (backward compatible).
+- <code>distribute=True</code> requires <code>runtime</code>.
+- If cluster has only one healthy write node, ingestion falls back to local chunked seed.
+- <code>from_excel_lazy()</code> requires <code>openpyxl</code> (<code>pip install hiveframe[excel]</code>).</p>
 
 
 
