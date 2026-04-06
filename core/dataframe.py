@@ -763,7 +763,10 @@ class DFrame:
     def read_fresh(self) -> pd.DataFrame:
         """Return latest namespace-isolated snapshot.
 
-        Always returns the local write_node snapshot synchronously.
+        Always returns the local write-node snapshot synchronously.
+        This path does not read from ReadNode/WAL. In transactional=False mode,
+        this is the intended simple distributed read path: read directly from the
+        owning writer snapshot.
         For global cluster reads (fan-out across all nodes), use read_fresh_async().
         """
         return self._get_cached_snapshot()
@@ -789,6 +792,10 @@ class DFrame:
 
         Use this inside async contexts (e.g. asyncio.run, async def).
         In standalone mode this is equivalent to read_fresh().
+
+        This fan-out targets writer nodes directly. In transactional=False mode,
+        this remains the supported multi-node read path; remote read-replica sync
+        is only provided by the WAL-backed transactional path.
         """
         if self._runtime is None or not self._runtime.config.enable_cluster:
             return self._build_local_snapshot()
@@ -835,7 +842,8 @@ class DFrame:
     def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000):
         """Yield DataFrame chunks lazily from the local write-node snapshot.
 
-        If a persisted parquet exists, stream from disk (truly lazy). Otherwise, fallback to in-memory chunking.
+        If a persisted parquet exists, stream from disk (truly lazy). Otherwise,
+        fallback to in-memory chunking from the writer snapshot.
         """
         parquet_path = None
         if self._coordinator and hasattr(self._coordinator, 'read_node'):

@@ -456,10 +456,14 @@ print(df.read_fresh())
 
 Behavior in this mode:
 - writes still apply (including distributed routing when `runtime` is attached),
+- `read_fresh()` and `read_fresh_global_async()` read directly from writer snapshots,
 - no lock-manager transaction lifecycle,
 - no WAL entries,
+- no WAL-backed read-replica sync,
 - `cell_history()` returns empty list,
 - `checkpoint()` / `rollback()` are disabled.
+
+Use this mode when you want simple distributed writers and direct reads from those writers. If you need read replicas to stay in sync, keep `transactional=True`.
 
 ### Cell History (Audit Trail)
 

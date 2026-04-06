@@ -27,6 +27,8 @@ By default, `DFrame` runs in transactional mode. You can set `transactional=Fals
 When `transactional=False`:
 - writes bypass lock-manager + WAL lifecycle,
 - distributed routing and global reads still work,
+- reads come from writer snapshots directly,
+- read-replica sync is not provided,
 - `cell_history()` returns `[]`,
 - `checkpoint()` and `rollback()` raise `RuntimeError`.
 

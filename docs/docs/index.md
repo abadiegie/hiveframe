@@ -155,6 +155,7 @@ Core principle of DFrame:
 - **`read_fresh_global_lazy()`** yields DataFrame chunks (default 1000 rows per chunk) from the global merged snapshot (all cluster nodes). Only available in sync context; raises if called in an event loop.
 - If an event loop is already running, `read_fresh_global()` raises and you should use `await read_fresh_global_async()` directly.
 - In **standalone** mode (no cluster), both methods behave identically and read from the local node.
+- In `transactional=False` mode, reads still come from writer snapshots directly. This is the intended simple distributed mode; WAL-backed read-replica sync is not provided there.
 
 ---
 
@@ -423,6 +424,31 @@ cp = df.checkpoint("before_ai")
 # ... modify data ...
 df.rollback(cp)  # Undo to checkpoint
 ```
+
+### Non-Transactional Fast Path
+
+For single-writer ETL/pipeline workloads where speed is more important than auditability:
+
+```python
+import hiveframe as hf
+
+df = hf.DFrame(
+    {"x": [1, 2, 3]},
+    transactional=False,
+)
+
+df["x"] = [10, 20, 30]
+print(df.read_fresh())
+```
+
+Behavior in this mode:
+- writes still apply (including distributed routing when `runtime` is attached),
+- `read_fresh()` and `read_fresh_global_async()` read directly from writer snapshots,
+- no lock-manager transaction lifecycle,
+- no WAL entries,
+- no WAL-backed read-replica sync,
+- `cell_history()` returns empty list,
+- `checkpoint()` / `rollback()` are disabled.
 
 ### Cell History (Audit Trail)
 

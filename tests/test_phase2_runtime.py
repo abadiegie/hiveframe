@@ -136,6 +136,28 @@ def test_runtime_tcp_transport_global_snapshot_roundtrip() -> None:
     asyncio.run(run())
 
 
+def test_non_transactional_submit_does_not_trigger_replication() -> None:
+    runtime = ClusterRuntime(
+        RuntimeConfig(node_id="writer-no-tx", role="write", enable_cluster=True)
+    )
+
+    calls: list[tuple[int, dict]] = []
+
+    async def fake_replicate(lsn: int, tx_data: dict) -> bool:
+        calls.append((lsn, tx_data))
+        return True
+
+    runtime.replication.replicate_tx = fake_replicate  # type: ignore[method-assign]
+
+    ops = [Operation(cell_id="x_0", old_value=None, new_value="hello", author_type="human", author_id="u")]
+    ok = runtime.coordinator.submit_non_transactional(ops)
+
+    assert ok is True
+    assert calls == []
+    assert runtime.coordinator.wal._entries == []
+    assert runtime.coordinator.write_node.get("x_0") == "hello"
+
+
 @integration
 def test_replication_delta_received_by_read_node() -> None:
     """Integration: write on writer-node delta is received by read-node in cluster mode."""

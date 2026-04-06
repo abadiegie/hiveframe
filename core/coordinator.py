@@ -123,7 +123,12 @@ class TransactionCoordinator:
             self.lock_manager.release(tx.tx_id)
 
     def submit_non_transactional(self, operations: list[Operation]) -> bool:
-        """Apply operations directly without coordinator locks/WAL bookkeeping."""
+        """Apply operations directly without coordinator locks/WAL bookkeeping.
+
+        This path intentionally skips WAL append and replication_manager dispatch.
+        Use it for simple/single-writer distributed mode where readers fetch data
+        from writer snapshots directly instead of relying on read-replica sync.
+        """
         if not operations:
             return True
         tx = Transaction(operations=operations)
