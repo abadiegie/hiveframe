@@ -2,10 +2,11 @@
 
 ## Overview
 
-Hiveframe agent layer has two main interfaces:
+Hiveframe agent layer has three main interfaces:
 
 - `AgentWriter` for transactional writes into a single `DFrame`
 - `MultiFrameAgent` for analysis across one or many `DFrame` objects (sample/query mode)
+- `SeriesSpec` for structured chart-ready data output from LLM analysis
 
 ## AgentWriter Key Methods
 
@@ -47,19 +48,99 @@ In `query` mode:
 
 ### Result Types
 
-- `MultiFrameResult`
-- `FrameInsight`
+- `MultiFrameResult` — top-level result with `analysis`, `insights`, `series`, metadata
+- `FrameInsight` — single insight with `finding`, `frames`, `confidence`
+- `SeriesSpec` — chart-ready data series (see below)
 
-Both are exported from `hiveframe.agent`.
+All three are exported from `hiveframe.agent`.
 
-## Example
+---
+
+## SeriesSpec
+
+`SeriesSpec` is a structured data output produced by the LLM analysis. It holds aggregated
+data rows ready to be rendered as a chart. The user decides chart type and styling.
+
+```
+LLM query results → SeriesSpec.data → pd.DataFrame → plotly Figure → PNG
+```
+
+### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Unique snake_case identifier |
+| `description` | `str` | What the series shows — use as chart title |
+| `data` | `list[dict]` | Actual aggregated data rows from query results |
+| `suggested_x` | `str` | Column suggested for x-axis |
+| `suggested_y` | `str \| list[str]` | Column(s) suggested for y-axis |
+| `suggested_group_by` | `str \| None` | Column for color grouping |
+| `unit` | `str` | Unit label, e.g. `"IDR"`, `"%"` |
+| `source_frames` | `list[str]` | Frame labels that produced this data |
+
+### Methods
+
+| Method | Returns | Description |
+|---|---|---|
+| `to_dataframe()` | `pd.DataFrame` | Convert `data` to a pandas DataFrame |
+| `to_plotly_figure(chart_type, **kwargs)` | `go.Figure` | Render with Plotly. `chart_type`: `line\|bar\|scatter\|area\|pie\|histogram` |
+| `save_chart(path, chart_type, width, height, scale)` | `str` | Save as PNG, returns absolute path |
+
+Requires `pip install hiveframe[charts]` (`plotly>=5.0`, `kaleido>=0.2`).
+
+### MultiFrameResult chart helpers
+
+`MultiFrameResult.series` is a `list[SeriesSpec]` populated automatically when the LLM
+returns series data.
+
+| Method | Description |
+|---|---|
+| `get_series(name)` | Get `SeriesSpec` by name, `None` if not found |
+| `to_dataframe(name)` | Get data as `pd.DataFrame`, empty if not found |
+| `to_plotly_figure(name, chart_type, **kwargs)` | Get Plotly figure, raises `KeyError` if not found |
+| `save_chart(name, path, chart_type, **kwargs)` | Save one series as PNG |
+| `save_all_charts(output_dir, chart_type)` | Save all series as PNGs, skips failures silently |
+
+### Example
 
 ```python
-from hiveframe.agent.writer import AgentWriter
+import asyncio
+import hiveframe as hf
+from hiveframe.agent import MultiFrameAgent
 
-writer = AgentWriter(df._coordinator, agent_id="normalizer", author_type="llm_normalization")
-await writer.normalize(f"{df._frame_id}::city_0", "DKI Jakarta", confidence=0.97)
+async def main() -> None:
+    sales = hf.DFrame({"month": ["Jan", "Feb", "Mar"], "revenue": [100, 150, 200]})
+    agent = MultiFrameAgent(frames={"sales": sales}, provider="anthropic")
+
+    result = await agent.analyze("Trend revenue per bulan", mode="query")
+
+    # Check what series the LLM produced
+    print(result.to_markdown())
+    # ## Available Charts
+    # - `revenue_trend` — Monthly revenue trend
+    #   x: `month` | y: `revenue` | 3 rows
+
+    # Access raw data
+    df = result.to_dataframe("revenue_trend")
+    print(df)
+
+    # User decides chart type
+    fig = result.to_plotly_figure("revenue_trend", chart_type="line", title="Revenue Q1")
+    fig.show()
+
+    # Save as PNG (requires kaleido)
+    path = result.save_chart("revenue_trend", "output/revenue.png", chart_type="bar")
+    print(f"Saved: {path}")
+
+    # Save all series at once
+    paths = result.save_all_charts("output/charts/")
+    for name, p in paths.items():
+        print(f"{name}: {p}")
+
+asyncio.run(main())
 ```
+
+---
 
 ## MultiFrameAgent Example
 
@@ -69,14 +150,13 @@ import hiveframe as hf
 from hiveframe.agent import MultiFrameAgent
 
 async def main() -> None:
-	sales = hf.DFrame({"city": ["jakarta", "bandung", "jakarta"], "score": [90, 80, 70]})
-	inventory = hf.DFrame({"city": ["jakarta", "bandung"], "stock": [12, 4]})
+    sales = hf.DFrame({"city": ["jakarta", "bandung", "jakarta"], "score": [90, 80, 70]})
+    inventory = hf.DFrame({"city": ["jakarta", "bandung"], "stock": [12, 4]})
 
-	agent = MultiFrameAgent(frames={"sales": sales, "inventory": inventory})
-	result = await agent.analyze("City mana score tinggi tapi stock rendah?", mode="query")
-	print(result.analysis)
-	print(result.to_markdown())
+    agent = MultiFrameAgent(frames={"sales": sales, "inventory": inventory})
+    result = await agent.analyze("City mana score tinggi tapi stock rendah?", mode="query")
+    print(result.analysis)
+    print(result.to_markdown())
 
 asyncio.run(main())
 ```
-

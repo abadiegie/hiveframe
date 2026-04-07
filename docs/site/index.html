@@ -2572,12 +2572,21 @@ async def main() -&gt; None:
     sample_result = await agent.analyze(&quot;Bandingkan performa city vs stock&quot;, mode=&quot;sample&quot;)
     print(sample_result.analysis)
 
-    query_result = await agent.analyze(&quot;City mana score tinggi tapi stock rendah?&quot;, mode=&quot;query&quot;)
+    query_result = await agent.analyze(
+        &quot;City mana score tinggi tapi stock rendah?&quot;,
+        mode=&quot;query&quot;,
+        max_retries=1,
+    )
     print(query_result.to_markdown())
+    print(query_result.total_llm_calls, query_result.final_verdict)
 
 asyncio.run(main())
 </code></pre>
 <p><code>MultiFrameAgent</code> juga dapat dipakai untuk satu frame (<code>frames={"data": df}</code>) dan optional menulis hasil ke <code>output_frame</code> saat response menyertakan <code>operations</code>.</p>
+<p>Iterative metadata pada <code>MultiFrameResult</code>:
+- <code>review_history</code> untuk jejak verdict per attempt (<code>accepted|partial|error|plan|rejected|merge</code>)
+- <code>total_llm_calls</code> untuk observability cost/latency
+- <code>converged</code> dan <code>final_verdict</code> untuk status akhir</p>
 <h3 id="cluster-mode-multiple-independent-dframes-on-same-node">Cluster mode — multiple independent DFrames on same node</h3>
 <pre><code class="language-python">import asyncio
 import hiveframe as hf
