@@ -29,6 +29,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Guides:
+    - Iterative Agent: guides/iterative-agent.md
     - Checkpoint & Rollback: guides/checkpoint.md
     - Cell History: guides/cell-history.md
     - Homelab Setup: guides/homelab-setup.md

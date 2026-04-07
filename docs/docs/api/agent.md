@@ -33,18 +33,23 @@ In `query` mode:
 
 ### Review Verdicts
 
-- `accepted`
-- `partial`
-- `error`
-- `plan`
-- `rejected`
-- `merge`
+| Verdict | Meaning |
+|---|---|
+| `accepted` | Results fully answer the instruction |
+| `merge` | Sufficient partial results across queries |
+| `partial` | Some results useful, specific parts missing |
+| `error` | One or more queries failed technically |
+| `plan` | Needs columns not yet visible in schema |
+| `rejected` | Results not relevant — wrong approach |
 
 `MultiFrameResult` also includes iterative metadata:
-- `review_history`
-- `total_llm_calls`
-- `converged`
-- `final_verdict`
+- `review_history` — `list[ReviewVerdict]`, one per attempt
+- `total_llm_calls` — total LLM calls (query + review + final analysis)
+- `converged` — `True` if last verdict was `accepted` or `merge`
+- `final_verdict` — last verdict status string
+
+For full loop behavior, verdict handling, and examples see
+[Guides → Iterative Agent](../guides/iterative-agent.md).
 
 ### Result Types
 
