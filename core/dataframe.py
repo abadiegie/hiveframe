@@ -99,6 +99,21 @@ class DFrame:
             self._seed_initial_data(data)
 
     @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, list[Any]],
+        schema: "dict[str, ColumnSchema] | None" = None,
+        transactional: bool = True,
+    ) -> "DFrame":
+        """Create a DFrame from a plain dict of lists.
+
+        Example::
+
+            df = DFrame.from_dict({"month": ["Jan", "Feb"], "revenue": [100, 200]})
+        """
+        return cls(data=data, schema=schema, transactional=transactional)
+
+    @classmethod
     def from_runtime(
         cls,
         runtime: "ClusterRuntime",
