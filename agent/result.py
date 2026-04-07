@@ -5,8 +5,123 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import pandas as pd
+    import plotly.graph_objects as go
+
+_logger = logging.getLogger("hiveframe.result")
+
+
+@dataclass
+class SeriesSpec:
+    """Structured data output dari LLM analysis, siap di-render sebagai chart."""
+
+    name: str
+    description: str
+    data: list[dict[str, Any]]
+    suggested_x: str = ""
+    suggested_y: str | list[str] = ""
+    suggested_group_by: str | None = None
+    unit: str = ""
+    source_frames: list[str] = field(default_factory=list)
+
+    def to_dataframe(self) -> "pd.DataFrame":
+        """Convert data ke pandas DataFrame. Return empty DataFrame kalau data kosong."""
+        import pandas as pd
+
+        if not self.data:
+            return pd.DataFrame()
+        return pd.DataFrame(self.data)
+
+    def to_plotly_figure(
+        self,
+        chart_type: str = "line",
+        **kwargs: Any,
+    ) -> "go.Figure":
+        """Convert ke Plotly figure dengan chart_type yang user pilih.
+
+        Args:
+            chart_type: "line"|"bar"|"scatter"|"area"|"pie"|"histogram"
+            **kwargs: Diteruskan ke plotly.express function.
+
+        Raises:
+            ImportError: kalau plotly tidak terinstall.
+            ValueError: kalau chart_type tidak dikenali atau data kosong.
+        """
+        try:
+            import importlib as _importlib
+            px = _importlib.import_module("plotly.express")
+        except ImportError:
+            raise ImportError("plotly required for chart rendering: pip install plotly")
+
+        df = self.to_dataframe()
+        if df.empty:
+            raise ValueError(f"SeriesSpec '{self.name}' has no data to plot")
+
+        plot_kwargs: dict[str, Any] = {"title": self.description}
+        if self.suggested_x:
+            plot_kwargs["x"] = self.suggested_x
+        if self.suggested_y:
+            plot_kwargs["y"] = self.suggested_y
+        if self.suggested_group_by:
+            plot_kwargs["color"] = self.suggested_group_by
+
+        plot_kwargs.update(kwargs)
+        plot_kwargs["data_frame"] = df
+
+        _CHART_BUILDERS = {
+            "line": px.line,
+            "bar": px.bar,
+            "scatter": px.scatter,
+            "area": px.area,
+            "pie": px.pie,
+            "histogram": px.histogram,
+        }
+
+        builder = _CHART_BUILDERS.get(chart_type.lower())
+        if builder is None:
+            supported = ", ".join(_CHART_BUILDERS.keys())
+            raise ValueError(f"Unknown chart_type '{chart_type}'. Supported: {supported}")
+
+        return builder(**plot_kwargs)
+
+    def save_chart(
+        self,
+        path: str,
+        chart_type: str = "line",
+        width: int = 900,
+        height: int = 500,
+        scale: float = 2.0,
+        **kwargs: Any,
+    ) -> str:
+        """Render chart dan save sebagai PNG.
+
+        Returns:
+            Absolute path dari file yang disimpan.
+
+        Raises:
+            ImportError: kalau plotly atau kaleido tidak terinstall.
+        """
+        from pathlib import Path
+
+        fig = self.to_plotly_figure(chart_type=chart_type, **kwargs)
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            fig.write_image(str(output_path), width=width, height=height, scale=scale)
+        except Exception as exc:
+            if "kaleido" in str(exc).lower():
+                raise ImportError(
+                    "kaleido required for PNG export: pip install kaleido"
+                ) from exc
+            raise
+
+        return str(output_path.resolve())
 
 
 @dataclass
@@ -50,6 +165,90 @@ class MultiFrameResult:
     total_llm_calls: int = 0
     converged: bool = False
     final_verdict: str = ""
+    series: list[SeriesSpec] = field(default_factory=list)
+
+    def get_series(self, name: str) -> SeriesSpec | None:
+        """Get SeriesSpec by name. Return None kalau tidak ditemukan."""
+        for s in self.series:
+            if s.name == name:
+                return s
+        return None
+
+    def to_dataframe(self, name: str) -> "pd.DataFrame":
+        """Get data dari series tertentu sebagai pandas DataFrame.
+
+        Returns empty DataFrame kalau name tidak ditemukan.
+        """
+        spec = self.get_series(name)
+        if spec is None:
+            import pandas as pd
+            return pd.DataFrame()
+        return spec.to_dataframe()
+
+    def to_plotly_figure(
+        self,
+        name: str,
+        chart_type: str = "line",
+        **kwargs: Any,
+    ) -> "go.Figure":
+        """Get Plotly figure dari series tertentu.
+
+        Raises:
+            KeyError: kalau name tidak ditemukan.
+        """
+        spec = self.get_series(name)
+        if spec is None:
+            raise KeyError(
+                f"Series '{name}' not found. "
+                f"Available: {[s.name for s in self.series]}"
+            )
+        return spec.to_plotly_figure(chart_type=chart_type, **kwargs)
+
+    def save_chart(
+        self,
+        name: str,
+        path: str,
+        chart_type: str = "line",
+        **kwargs: Any,
+    ) -> str:
+        """Save chart dari series tertentu sebagai PNG.
+
+        Returns:
+            Absolute path dari file yang disimpan.
+
+        Raises:
+            KeyError: kalau name tidak ditemukan.
+        """
+        spec = self.get_series(name)
+        if spec is None:
+            raise KeyError(
+                f"Series '{name}' not found. "
+                f"Available: {[s.name for s in self.series]}"
+            )
+        return spec.save_chart(path, chart_type=chart_type, **kwargs)
+
+    def save_all_charts(
+        self,
+        output_dir: str = ".",
+        chart_type: str = "line",
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        """Save semua series sebagai PNG files.
+
+        Returns:
+            Dict name → absolute path. Series yang gagal di-skip.
+        """
+        import os
+
+        paths: dict[str, str] = {}
+        for spec in self.series:
+            try:
+                file_path = os.path.join(output_dir, f"{spec.name}.png")
+                saved = spec.save_chart(file_path, chart_type=chart_type, **kwargs)
+                paths[spec.name] = saved
+            except Exception as exc:
+                _logger.warning("Failed to save chart '%s': %s", spec.name, exc)
+        return paths
 
     def to_markdown(self) -> str:
         """Format hasil sebagai markdown report."""
@@ -68,6 +267,28 @@ class MultiFrameResult:
                     f"   Sources: {frames_str}\n"
                     f"   Confidence: {insight.confidence:.0%}"
                 )
+
+        if self.series:
+            parts.append("\n## Available Charts\n")
+            for spec in self.series:
+                y_str = (
+                    ", ".join(spec.suggested_y)
+                    if isinstance(spec.suggested_y, list)
+                    else spec.suggested_y
+                )
+                group_part = (
+                    f" | group: `{spec.suggested_group_by}`"
+                    if spec.suggested_group_by
+                    else ""
+                )
+                parts.append(
+                    f"- **`{spec.name}`** — {spec.description}\n"
+                    f"  x: `{spec.suggested_x}` | y: `{y_str}`"
+                    f"{group_part} | {len(spec.data)} rows"
+                )
+            parts.append(
+                "\n_Use `result.to_plotly_figure(name, chart_type)` to render._"
+            )
 
         if self.review_history:
             parts.append("\n## Iteration History\n")
@@ -114,7 +335,7 @@ class MultiFrameResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize ke dict untuk JSON response."""
 
-        return {
+        base: dict[str, Any] = {
             "action": self.action,
             "reasoning": self.reasoning,
             "analysis": self.analysis,
@@ -149,4 +370,22 @@ class MultiFrameResult:
             "converged": self.converged,
             "final_verdict": self.final_verdict,
         }
+
+        if self.series:
+            base["series"] = [
+                {
+                    "name": s.name,
+                    "description": s.description,
+                    "suggested_x": s.suggested_x,
+                    "suggested_y": s.suggested_y,
+                    "suggested_group_by": s.suggested_group_by,
+                    "unit": s.unit,
+                    "source_frames": s.source_frames,
+                    "row_count": len(s.data),
+                    # data tidak di-include — gunakan to_dataframe() untuk akses data
+                }
+                for s in self.series
+            ]
+
+        return base
 

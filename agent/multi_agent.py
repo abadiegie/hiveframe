@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .prompt import parse_plan
-from .result import FrameInsight, MultiFrameResult, ReviewVerdict
+from .result import FrameInsight, MultiFrameResult, ReviewVerdict, SeriesSpec
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -562,12 +562,34 @@ class MultiFrameAgent:
                 )
             )
 
+        series: list[SeriesSpec] = []
+        for raw_series in plan.get("series", []):
+            raw_data = raw_series.get("data", [])
+            if not isinstance(raw_data, list):
+                logger.warning("Skipping series '%s': data is not a list", raw_series.get("name", "?"))
+                continue
+            clean_data = [item for item in raw_data if isinstance(item, dict)]
+            if not clean_data:
+                logger.warning("Skipping series '%s': no valid data rows", raw_series.get("name", "?"))
+                continue
+            series.append(SeriesSpec(
+                name=str(raw_series.get("name", f"series_{len(series)}")),
+                description=str(raw_series.get("description", "")),
+                data=clean_data,
+                suggested_x=str(raw_series.get("suggested_x", "")),
+                suggested_y=raw_series.get("suggested_y", ""),
+                suggested_group_by=raw_series.get("suggested_group_by"),
+                unit=str(raw_series.get("unit", "")),
+                source_frames=list(raw_series.get("source_frames", [])),
+            ))
+
         return MultiFrameResult(
             action=str(plan.get("action", "analyze")),
             reasoning=str(plan.get("reasoning", "")),
             analysis=str(plan.get("analysis", "")),
             insights=insights,
             operations=list(plan.get("operations", [])),
+            series=series,
         )
 
 

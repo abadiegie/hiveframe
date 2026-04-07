@@ -410,6 +410,42 @@ def build_review_messages(
     return messages
 
 
+_ANALYSIS_WITH_SERIES_PROMPT = (
+    "You are a data analyst generating insights from query results.\n\n"
+    "## Output format\n\n"
+    "Respond with raw JSON:\n"
+    "{\n"
+    '  "action": "analyze",\n'
+    '  "reasoning": "brief explanation of approach",\n'
+    '  "analysis": "narrative analysis text",\n'
+    '  "insights": [\n'
+    '    {"finding": "specific finding", "frames": ["frame_label"], "confidence": 0.0}\n'
+    "  ],\n"
+    '  "series": [\n'
+    "    {\n"
+    '      "name": "snake_case_identifier",\n'
+    '      "description": "what this data shows",\n'
+    '      "suggested_x": "column_name",\n'
+    '      "suggested_y": "column_name or [list]",\n'
+    '      "suggested_group_by": "column_name or null",\n'
+    '      "unit": "IDR|units|%|etc or empty string",\n'
+    '      "source_frames": ["frame_label"],\n'
+    '      "data": [{"col": "val"}, ...]\n'
+    "    }\n"
+    "  ],\n"
+    '  "operations": []\n'
+    "}\n\n"
+    "## Series rules\n\n"
+    "- Include series ONLY when data is suitable for visualization\n"
+    "- name must be snake_case, unique, descriptive\n"
+    "- data must be the ACTUAL aggregated data from query results\n"
+    "- Keep data rows focused: max 200 rows per series\n"
+    '- suggested_y can be a list for multi-line charts e.g. ["revenue", "target"]\n'
+    "- If no visualization makes sense, series = []\n"
+    "- Do NOT invent data — only use data from query results\n"
+)
+
+
 def build_analysis_messages(
     instruction: str,
     query_results: dict[str, str],
@@ -417,25 +453,7 @@ def build_analysis_messages(
     original_queries: dict[str, str],
 ) -> list[dict[str, str]]:
     """Build messages untuk fase 2 query mode."""
-    system = (
-        "You are a data analyst. Query results have been "
-        "provided from one or more DataFrames. "
-        "Generate a clear analysis based on these results.\n\n"
-        "## Rules\n\n"
-        "- Base analysis ONLY on provided query results\n"
-        "- Cite which frames support each finding\n"
-        "- Note any query errors that limited the analysis\n"
-        "- Include confidence per insight\n\n"
-        "## Response format\n\n"
-        "Raw JSON only:\n"
-        '{"action":"analyze",'
-        '"reasoning":"...","analysis":"narrative",'
-        '"insights":[{"finding":"...","frames":[...],'
-        '"confidence":0.0}],'
-        '"operations":[]}'
-    )
-
-    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    messages: list[dict[str, str]] = [{"role": "system", "content": _ANALYSIS_WITH_SERIES_PROMPT}]
 
     result_parts = [f"## Original instruction\n\n{instruction}"]
 
@@ -457,4 +475,6 @@ def build_analysis_messages(
     messages.append({"role": "system", "content": "\n\n---\n\n".join(result_parts)})
     messages.append({"role": "user", "content": "Generate analysis based on the query results above."})
     return messages
+
+
 
