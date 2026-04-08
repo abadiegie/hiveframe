@@ -88,7 +88,7 @@ _FORBIDDEN_PATTERNS = (
 
 
 class MultiFrameAgent:
-    """LLM agent untuk analisis satu atau banyak DFrame."""
+    """LLM agent for analyzing one or multiple DFrame objects."""
 
     def __init__(
         self,
@@ -107,6 +107,7 @@ class MultiFrameAgent:
         self._model = model
         self._anthropic_api_key = anthropic_api_key
         self._openai_api_key = openai_api_key
+        self._columns_hint: dict[str, list[str]] | None = None
 
         logger.info(
             "MultiFrameAgent created frames=%s provider=%s",
@@ -118,14 +119,30 @@ class MultiFrameAgent:
         self,
         instruction: str,
         mode: str = "sample",
-        max_sample_rows: int = 50,
+        max_sample_rows: int = 5,
         max_result_rows: int = 200,
         output_frame: "DFrame | None" = None,
         max_retries: int = 0,
+        columns_hint: dict[str, list[str]] | None = None,
     ) -> MultiFrameResult:
-        """Jalankan analisis LLM terhadap satu atau banyak frame."""
+        """Run LLM analysis over one or multiple frames.
+
+        Args:
+            instruction: Natural language instruction from the user.
+            mode: "sample" or "query".
+            max_sample_rows: Number of sample rows per frame in sample mode.
+            max_result_rows: Maximum query-result rows sent to the LLM.
+            output_frame: Optional destination frame for write operations.
+            max_retries: Number of retries for iterative query mode.
+            columns_hint: Dict label -> list of relevant columns. When set,
+                sample/query context prioritizes these columns to reduce
+                payload size. When None, behavior remains unchanged.
+        """
         if mode not in ("sample", "query"):
             raise ValueError("mode must be 'sample' or 'query'")
+
+        # Reset per call to avoid state leaks across analyze() invocations.
+        self._columns_hint = columns_hint
 
         if mode == "query":
             if max_retries > 0:
@@ -151,11 +168,22 @@ class MultiFrameAgent:
 
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
-            contexts[label] = frame.describe_for_agent(
-                max_rows=max_rows,
-                include_schema=True,
-                include_stats=True,
-            )
+            hint_cols = self._columns_hint.get(label) if self._columns_hint is not None else None
+
+            if hint_cols is not None:
+                contexts[label] = self._build_context_with_hint(
+                    label=label,
+                    frame=frame,
+                    columns=hint_cols,
+                    max_rows=max_rows,
+                )
+                logger.info("Using columns_hint for frame '%s': %s", label, hint_cols)
+            else:
+                contexts[label] = frame.describe_for_agent(
+                    max_rows=max_rows,
+                    include_schema=True,
+                    include_stats=True,
+                )
 
         messages = build_multi_frame_messages(
             instruction=instruction,
@@ -226,7 +254,7 @@ class MultiFrameAgent:
         max_result_rows: int,
         max_retries: int,
     ) -> MultiFrameResult:
-        """Iterative query mode dengan review+retry loop."""
+        """Iterative query mode with review+retry loop."""
         from .prompt import (
             build_analysis_messages,
             build_query_generation_messages,
@@ -460,34 +488,126 @@ class MultiFrameAgent:
         return frame_result
 
     def _build_schema_context(self) -> dict[str, str]:
-        """Build schema + statistics tanpa sample rows."""
+        """Build schema + statistics context without sample rows."""
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
             fresh = frame.read_fresh()
+            hint_cols = self._columns_hint.get(label) if self._columns_hint is not None else None
+
             parts = [
                 f"label: {label}",
                 f"frame_id: {frame._frame_id}",
                 f"shape: {len(fresh):,} rows x {len(fresh.columns)} columns",
-                f"\nColumn dtypes:\n{fresh.dtypes.to_string()}",
             ]
 
-            numeric = fresh.select_dtypes(include="number")
-            if not numeric.empty:
-                try:
-                    stats = numeric.describe()
-                    parts.append(f"\nStatistics:\n{stats.to_string()}")
-                except Exception:
-                    pass
+            if hint_cols is not None:
+                available_hints = [c for c in hint_cols if c in fresh.columns]
+                missing_hints = [c for c in hint_cols if c not in fresh.columns]
+                if missing_hints:
+                    logger.warning(
+                        "_build_schema_context: columns not found in frame '%s': %s",
+                        label,
+                        missing_hints,
+                    )
 
-            if frame._schema:
-                parts.append("\nColumn descriptions:")
-                for col, schema in frame._schema.items():
-                    desc = schema.description or schema.dtype
-                    parts.append(f"  {col}: {desc}")
+                if not available_hints:
+                    logger.warning(
+                        "_build_schema_context: no valid hint columns for frame '%s', "
+                        "falling back to full schema",
+                        label,
+                    )
+                    parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+                else:
+                    parts.append("\nRelevant columns (use these for queries):")
+                    for col in available_hints:
+                        dtype = fresh[col].dtype
+                        n_unique = fresh[col].nunique(dropna=True)
+                        parts.append(f"  {col}: {dtype} ({n_unique:,} unique values)")
+
+                    other_cols = [c for c in fresh.columns if c not in available_hints]
+                    if other_cols:
+                        parts.append("\nOther available columns (not selected for this analysis):")
+                        parts.append(f"  {other_cols}")
+            else:
+                parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+
+                numeric = fresh.select_dtypes(include="number")
+                if not numeric.empty:
+                    try:
+                        stats = numeric.describe()
+                        parts.append(f"\nStatistics:\n{stats.to_string()}")
+                    except Exception:
+                        pass
+
+                if frame._schema:
+                    parts.append("\nColumn descriptions:")
+                    for col, schema in frame._schema.items():
+                        desc = schema.description or schema.dtype
+                        parts.append(f"  {col}: {desc}")
 
             contexts[label] = "\n".join(parts)
 
         return contexts
+
+    def _build_context_with_hint(
+        self,
+        label: str,
+        frame: "DFrame",
+        columns: list[str],
+        max_rows: int = 5,
+    ) -> str:
+        """Build token-efficient context using selected columns and sample rows."""
+        fresh = frame.read_fresh()
+
+        available = [c for c in columns if c in fresh.columns]
+        missing = [c for c in columns if c not in fresh.columns]
+
+        if missing:
+            logger.warning(
+                "_build_context_with_hint: columns not found in frame '%s': %s",
+                label,
+                missing,
+            )
+
+        if not available:
+            logger.warning(
+                "_build_context_with_hint: no valid columns for frame '%s', "
+                "falling back to all columns",
+                label,
+            )
+            available = list(fresh.columns)
+
+        subset = fresh[available].head(max_rows)
+
+        parts = [
+            f"label: {label}",
+            f"frame_id: {frame._frame_id}",
+            f"total_rows: {len(fresh):,}",
+            f"showing_columns: {available}",
+            "(other columns not shown - not relevant to instruction)",
+            f"\nSample ({min(max_rows, len(fresh))} of {len(fresh):,} rows):",
+            subset.to_string(index=True),
+            "\nColumn types:",
+        ]
+
+        for col in available:
+            parts.append(f"  {col}: {fresh[col].dtype}")
+
+        numeric = subset.select_dtypes(include="number")
+        if not numeric.empty:
+            try:
+                parts.append(f"\nNumeric statistics:\n{numeric.describe().to_string()}")
+            except Exception:
+                pass
+
+        obj_cols = subset.select_dtypes(include=["object", "string"]).columns
+        if len(obj_cols) > 0:
+            parts.append("\nTop values per categorical column:")
+            for col in obj_cols[:3]:
+                top = fresh[col].value_counts().head(5)
+                parts.append(f"  {col}: {top.to_dict()}")
+
+        return "\n".join(parts)
 
     async def _write_to_frame(self, operations: list[dict[str, Any]], output_frame: "DFrame") -> dict[str, Any]:
         from .writer import AgentWriter

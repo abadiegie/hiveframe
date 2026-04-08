@@ -28,6 +28,8 @@ plugins:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - Agent:
+    - Columns Hint: agent/columns-hint.md
   - Guides:
     - Iterative Agent: guides/iterative-agent.md
     - Checkpoint & Rollback: guides/checkpoint.md

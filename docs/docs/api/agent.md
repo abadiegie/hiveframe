@@ -25,6 +25,10 @@ Hiveframe agent layer has three main interfaces:
 - `sample` — one LLM call using `describe_for_agent()` context per frame
 - `query` — iterative loop (`plan/act -> review -> optional retry -> final analysis`)
 
+Token-efficient mode is available via `columns_hint` in `analyze(...)`.
+See [Agent -> Columns Hint](../agent/columns-hint.md) and runnable example
+at `examples/multiframe_columns_hint.py`.
+
 In `query` mode:
 - each generated query must start with `df`
 - forbidden patterns (`import`, `exec`, `eval`, `open`, `os`, `sys`, etc.) are rejected

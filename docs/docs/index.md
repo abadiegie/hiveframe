@@ -31,6 +31,7 @@ Note: `TCPTransport` now uses real asyncio TCP sockets for cluster runtime traff
 - [Testing](#testing)
 - [Start Cluster](#start-cluster)
 - [Usage](#usage)
+- [Columns Hint (MultiFrameAgent)](#columns-hint-multiframeagent)
 - [LLM Agent Prompt](#llm-agent-prompt)
 - [Contributing](#contributing)
 - [License](#license)
@@ -654,6 +655,13 @@ Iterative metadata pada `MultiFrameResult`:
 - `review_history` untuk jejak verdict per attempt (`accepted|partial|error|plan|rejected|merge`)
 - `total_llm_calls` untuk observability cost/latency
 - `converged` dan `final_verdict` untuk status akhir
+
+## Columns Hint (MultiFrameAgent)
+
+For token-efficient analysis on wide frames, use `columns_hint` in `MultiFrameAgent.analyze(...)`.
+
+- Guide: [Agent -> Columns Hint](agent/columns-hint.md)
+- Runnable example: `examples/multiframe_columns_hint.py`
 
 ### Cluster mode — multiple independent DFrames on same node
 
