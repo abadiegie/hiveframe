@@ -6,10 +6,13 @@
 from .writer import AgentWriter
 from .multi_agent import MultiFrameAgent
 from .result import FrameInsight, MultiFrameResult
+from .relational_writer import FrameRelation, RelationalAgentWriter
 
 __all__ = [
 	"AgentWriter",
 	"MultiFrameAgent",
 	"MultiFrameResult",
 	"FrameInsight",
+	"RelationalAgentWriter",
+	"FrameRelation",
 ]

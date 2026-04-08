@@ -2,9 +2,10 @@
 
 ## Overview
 
-Hiveframe agent layer has three main interfaces:
+Hiveframe agent layer has four main interfaces:
 
 - `AgentWriter` for transactional writes into a single `DFrame`
+- `RelationalAgentWriter` for LLM normalization using cross-frame relational context
 - `MultiFrameAgent` for analysis across one or many `DFrame` objects (sample/query mode)
 - `SeriesSpec` for structured chart-ready data output from LLM analysis
 
@@ -13,6 +14,16 @@ Hiveframe agent layer has three main interfaces:
 - `normalize(cell_id, value, confidence)` — Write a single cell with confidence
 - `batch_enrich(operations)` — Write a batch of cell updates
 - `stream_normalize(column, llm_call, chunk_size=50)` — Normalize a column in streaming chunks
+
+## RelationalAgentWriter Key Methods
+
+- `stream_normalize_relational(target_column, instruction, chunk_size=10, provider, ...)` — Normalize a column using cross-frame relations
+
+For full API reference, parameter details, and examples see:
+[Agent → Relational Writer](../agent/relational-writer.md)
+
+Use `RelationalAgentWriter` when your LLM annotation workflow requires related data from other frames
+(e.g., comment stance depends on parent post context).
 
 ## MultiFrameAgent Key Methods
 

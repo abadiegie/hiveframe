@@ -30,6 +30,7 @@ nav:
   - Getting Started: getting-started.md
   - Agent:
     - Columns Hint: agent/columns-hint.md
+    - Relational Writer: agent/relational-writer.md
   - Guides:
     - Iterative Agent: guides/iterative-agent.md
     - Checkpoint & Rollback: guides/checkpoint.md
