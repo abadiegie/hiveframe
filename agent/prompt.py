@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Structured prompt builder for LLM agents interacting with the DataFrame API."""
 from __future__ import annotations
+
+import logging
 from typing import Any
+
+logger = logging.getLogger("hiveframe.agent.prompt")
+
 SYSTEM_PROMPT = (
     "You are a data transformation agent with access to a transactional distributed DataFrame engine.\n"
     "Your job is to process user instructions and translate them into precise API calls.\n\n"
@@ -265,17 +270,36 @@ def build_multi_frame_messages(
     mode: str = "sample",
     include_few_shot: bool = True,
 ) -> list[dict[str, str]]:
-    """Build messages untuk sample mode analysis."""
+    """Build messages for sample mode analysis.
+
+    Args:
+        instruction: Natural language instruction from the user.
+        frame_contexts: Dict label -> context string per frame.
+        mode: Reserved for future prompt variants.
+        include_few_shot: Whether to include few-shot examples.
+
+    Returns:
+        List of message dicts ready to send to a chat LLM.
+    """
     _ = mode  # reserved for future prompt variants
+
+    available_frames = list(frame_contexts.keys())
+    frames_list = ", ".join(f"`{f}`" for f in available_frames)
+
     system = (
         "You are a data analysis agent with access to one or more "
         "DataFrames.\n"
         "Each DataFrame is identified by a label.\n\n"
+        "## CRITICAL: Available DataFrames (ONLY these)\n\n"
+        f"EXACTLY these frames are available: {frames_list}\n"
+        "Do NOT reference frames that are not listed above.\n"
+        "Words in the instruction that are not in the list above "
+        "are COLUMN NAMES, not frame labels.\n\n"
         "## Your job\n\n"
         "Analyze the data across all provided DataFrames and "
         "generate insights based on the user instruction.\n\n"
         "## Rules\n\n"
-        "- Reference frames by their label\n"
+        "- Reference frames by their label (only from the list above)\n"
         "- Never invent data - only analyze what is shown\n"
         "- Cite which frames support each finding\n"
         "- Include confidence for each insight (0.0-1.0)\n"
@@ -300,7 +324,22 @@ def build_multi_frame_messages(
         messages.append({"role": "system", "content": "\n\n---\n\n".join(context_parts)})
 
     if include_few_shot:
-        messages.extend(MULTI_FRAME_FEW_SHOT_EXAMPLES)
+        # Only include few-shot examples whose frame references match
+        # the actual available frames — avoids confusing the LLM with
+        # frames that don't exist in the current session.
+        fake_frames = {"sales_q1", "sales_q2", "sales", "inventory"}
+        relevant_examples = [
+            ex for ex in MULTI_FRAME_FEW_SHOT_EXAMPLES
+            if not any(f in str(ex) for f in fake_frames - set(available_frames))
+        ]
+        if relevant_examples:
+            messages.extend(relevant_examples)
+        else:
+            logger.debug(
+                "build_multi_frame_messages: skipping few-shot examples "
+                "(frame mismatch). Available: %s",
+                available_frames,
+            )
 
     messages.append({"role": "user", "content": instruction})
     return messages
@@ -313,25 +352,48 @@ def build_query_generation_messages(
     iteration: int = 0,
 ) -> list[dict[str, str]]:
     """Build messages untuk fase 1 query mode."""
+    available_frames = list(frame_schemas.keys())
+    frames_list = ", ".join(f"`{f}`" for f in available_frames)
+    first_frame = available_frames[0] if available_frames else "data"
+    
     system = (
         "You are a data analyst. Given DataFrame schemas and "
         "an instruction, generate pandas queries to extract "
         "the most relevant data for analysis.\n\n"
+        "## CRITICAL: Available DataFrames (ONLY these)\n\n"
+        f"EXACTLY these frames exist and can be queried: {frames_list}\n"
+        f"Frame labels in your response MUST match one of: {frames_list}\n"
+        "Do NOT invent frame names — if the instruction mentions a word, "
+        "it is most likely a COLUMN NAME inside an existing frame, not a new frame label.\n\n"
         "## Rules\n\n"
-        "- Each query MUST start with 'df'\n"
-        "- Only use pandas methods - no imports, no file I/O\n"
+        "- Each query MUST start with 'df' — write actual executable pandas code\n"
+        "- Only use pandas methods - no imports, no file I/O, no text descriptions\n"
         "- Return aggregated/filtered data, not raw full frames\n"
         "- Keep results focused - prefer top-N over all rows\n"
-        "- If instruction only needs one frame, query one frame\n"
-        "- Forbidden: import, exec, eval, open, os, sys\n\n"
+        "- CRITICAL: frame_label MUST be exactly one from available list above\n"
+        "- CRITICAL: column names are CASE-SENSITIVE — use the EXACT column name from the schema\n"
+        "- Forbidden: import, exec, eval, open, os, sys, and any non-code text\n\n"
         "## Allowed pandas methods\n\n"
         "groupby, filter, query, nlargest, nsmallest, "
         "sort_values, head, tail, describe, value_counts, "
         "merge, pivot_table, agg, apply, loc, iloc\n\n"
         "## Response format\n\n"
-        "Raw JSON only:\n"
-        '{"queries":{"frame_label":"df_expression",...},'
-        '"reasoning":"why these queries"}'
+        "Raw JSON only. frame_label MUST be from available list. queries values must be EXECUTABLE pandas code:\n\n"
+        '{"queries":{"frame_label":"df.groupby(...).size().nlargest(10)"},'
+        '"reasoning":"why this query"}\n\n'
+        "## Concrete Examples\n\n"
+        f"If available frame is `{first_frame}` and instruction mentions a column (e.g. 'Category'):\n\n"
+        f"✓ CORRECT (use exact case from schema):\n"
+        f'{{"queries": {{"{first_frame}": "df[\'Category\'].value_counts().head(10)"}},\n'
+        f'"reasoning": "Count top 10 Category values"}}\n\n'
+        f"❌ WRONG — made-up frame name:\n"
+        f'{{"queries": {{"Category": "df[\'Category\'].value_counts()"}},\n'
+        f'"reasoning": "..."}}\n\n'
+        f"❌ WRONG — wrong column case (column is 'Category' not 'category'):\n"
+        f'{{"queries": {{"{first_frame}": "df[\'category\'].value_counts()"}},\n'
+        f'"reasoning": "..."}}\n\n'
+        "All query frame_labels MUST exactly match available frames above. "
+        "All column names MUST match the exact case shown in the schema."
     )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
@@ -349,13 +411,34 @@ def build_query_generation_messages(
             "content": (
                 f"## Reflection from previous attempt (attempt {iteration})\n\n"
                 f"{reflection}\n\n"
-                "Generate different queries based on this reflection. "
-                "Do not repeat the same approach that failed."
+                f"Generate different queries based on this reflection. "
+                f"CRITICAL: Use frame labels EXACTLY as listed above: {frames_list}\n"
+                f"Do not repeat the same approach that failed. "
+                f"Ensure all query values are executable pandas code starting with 'df'."
             ),
         })
 
-    messages.extend(QUERY_GEN_FEW_SHOT_EXAMPLES)
-    messages.append({"role": "user", "content": instruction})
+    # Only include few-shot examples if they match available frames
+    # to avoid confusing the LLM with unrelated frame names
+    if available_frames:
+        relevant_examples = [ex for ex in QUERY_GEN_FEW_SHOT_EXAMPLES 
+                            if not any(f in str(ex) for f in ["sales", "inventory", "sales_q1", "sales_q2"])]
+        if relevant_examples:
+            messages.extend(relevant_examples)
+        else:
+            # If no relevant examples, skip few-shot entirely rather than show mismatched frames
+            logger.debug(
+                "build_query_generation_messages: skipping few-shot examples (frame mismatch). "
+                "Available: %s", available_frames
+            )
+
+    # Strip output-mode wrapper if present (e.g. "Output mode: chart.\n...\nUser request:\n<bare>")
+    # Query generation only needs the bare user request; the wrapper is for analysis phase.
+    import re as _re
+    _match = _re.search(r"User request:\s*\n(.+)", instruction, _re.DOTALL)
+    query_instruction = _match.group(1).strip() if _match else instruction.strip()
+
+    messages.append({"role": "user", "content": query_instruction})
     return messages
 
 
@@ -594,6 +677,3 @@ def build_normalize_messages(
     })
 
     return messages
-
-
-
