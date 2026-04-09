@@ -10,6 +10,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from ._llm_debug import summarize_messages, truncate_text
 from .prompt import parse_plan
 from .result import FrameInsight, MultiFrameResult, ReviewVerdict, SeriesSpec
 
@@ -145,14 +146,13 @@ class MultiFrameAgent:
         self._columns_hint = columns_hint
 
         if mode == "query":
-            if max_retries > 0:
-                result = await self._analyze_query_mode_iterative(
-                    instruction,
-                    max_result_rows,
-                    max_retries,
-                )
-            else:
-                result = await self._analyze_query_mode_simple(instruction, max_result_rows)
+            # Always use iterative path; guarantee at least one correction pass.
+            effective_retries = max(1, max_retries)
+            result = await self._analyze_query_mode_iterative(
+                instruction,
+                max_result_rows,
+                effective_retries,
+            )
         else:
             result = await self._analyze_sample_mode(instruction, max_sample_rows)
 
@@ -199,7 +199,7 @@ class MultiFrameAgent:
         return await self._analyze_query_mode_simple(instruction, max_result_rows)
 
     async def _analyze_query_mode_simple(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
-        from .prompt import build_analysis_messages, build_query_generation_messages
+        from .prompt import build_analysis_messages, build_query_correction_messages, build_query_generation_messages
 
         schema_contexts = self._build_schema_context()
         query_gen_messages = build_query_generation_messages(
@@ -210,29 +210,147 @@ class MultiFrameAgent:
         raw_queries = await self._call_llm(query_gen_messages)
         query_plan = parse_plan(raw_queries)
         pandas_queries = query_plan.get("queries", {})
+        logger.debug(
+            "_analyze_query_mode_simple PARSED: queries=%d plan_keys=%s",
+            len(pandas_queries) if isinstance(pandas_queries, dict) else 0,
+            list(query_plan.keys()) if query_plan else "empty",
+        )
         if not isinstance(pandas_queries, dict) or not pandas_queries:
             logger.warning("LLM did not generate any queries, falling back to sample mode")
             return await self._analyze_sample_mode(instruction, 50)
 
-        query_results: dict[str, pd.DataFrame] = {}
+        query_results: dict[str, "pd.DataFrame"] = {}
         query_errors: dict[str, str] = {}
 
         for label, query_str in pandas_queries.items():
+            query_str = str(query_str).strip()
+            label = str(label).strip()
+
+            # CRITICAL: Validate frame label matches exactly
             frame = self._frames.get(label)
             if frame is None:
-                query_errors[label] = f"Frame '{label}' not found"
+                available = list(self._frames.keys())
+                query_errors[label] = (
+                    f"Frame label '{label}' not found. Available frames: {available}. "
+                    f"Frame label MUST match exactly."
+                )
+                logger.warning(
+                    "_analyze_query_mode_simple FRAME_MISMATCH: requested_label=%s available_frames=%s",
+                    label,
+                    available,
+                )
+                continue
+
+            # Validate query format early
+            if not query_str.startswith("df"):
+                query_errors[label] = f"Invalid query format: must start with 'df', got '{query_str[:50]}'"
+                logger.debug(
+                    "_analyze_query_mode_simple INVALID_QUERY: label=%s query=%s",
+                    label,
+                    query_str[:80],
+                )
                 continue
             try:
                 fresh = frame.read_fresh()
                 result_df = self._safe_eval(str(query_str), fresh)
                 query_results[label] = result_df.head(max_result_rows)
+                logger.debug(
+                    "_analyze_query_mode_simple EXEC_OK: label=%s query=%s rows=%d",
+                    label,
+                    query_str[:80],
+                    len(result_df),
+                )
             except Exception as exc:
                 query_errors[label] = str(exc)
+                logger.debug(
+                    "_analyze_query_mode_simple EXEC_ERROR: label=%s query=%s error=%s",
+                    label,
+                    query_str[:80],
+                    str(exc),
+                )
 
         result_contexts = {
             label: result_df.to_string(max_rows=max_result_rows)
             for label, result_df in query_results.items()
         }
+        logger.debug(
+            "_analyze_query_mode_simple BUILD_ANALYSIS: result_contexts=%d total_context_chars=%d query_errors=%s",
+            len(result_contexts),
+            sum(len(v) for v in result_contexts.values()),
+            query_errors if query_errors else "none",
+        )
+
+        if not result_contexts and query_errors:
+            error_details = "; ".join(f"{label}: {err}" for label, err in query_errors.items())
+
+            # Detect frame mismatch errors specifically
+            frame_mismatch_errors = [e for e in query_errors.values() if "not found" in e]
+            if frame_mismatch_errors:
+                logger.error(
+                    "_analyze_query_mode_simple FRAME_MISMATCH_DETECTED: "
+                    "LLM generated query with wrong frame labels. "
+                    "Available: %s, Requested: %s. "
+                    "See prompt and few-shot examples.",
+                    list(self._frames.keys()),
+                    list(pandas_queries.keys()),
+                )
+
+            logger.warning(
+                "_analyze_query_mode_simple NO_RESULTS: all queries failed. "
+                "Available frames: %s, Query labels: %s. Errors: %s. "
+                "Ensure LLM generates valid pandas expressions starting with 'df'.",
+                list(self._frames.keys()),
+                list(pandas_queries.keys()),
+                error_details,
+            )
+
+            # Attempt one self-correction pass before falling back to sample mode
+            logger.info(
+                "_analyze_query_mode_simple CORRECTION_ATTEMPT: errors=%s",
+                query_errors,
+            )
+            correction_messages = build_query_correction_messages(
+                instruction=instruction,
+                failed_queries={k: str(v) for k, v in pandas_queries.items()},
+                query_errors=query_errors,
+                frame_schemas=schema_contexts,
+            )
+            raw_corrected = await self._call_llm(correction_messages)
+            corrected_plan = parse_plan(raw_corrected)
+            corrected_queries = corrected_plan.get("queries", {})
+
+            if isinstance(corrected_queries, dict) and corrected_queries:
+                for label, query_str in corrected_queries.items():
+                    query_str = str(query_str).strip()
+                    frame = self._frames.get(label)
+                    if frame is None:
+                        continue
+                    try:
+                        fresh = frame.read_fresh()
+                        result_df = self._safe_eval(query_str, fresh)
+                        query_results[label] = result_df.head(max_result_rows)
+                        query_errors.pop(label, None)
+                        logger.info(
+                            "_analyze_query_mode_simple CORRECTION_OK: label=%s", label
+                        )
+                    except Exception as exc:
+                        query_errors[label] = str(exc)
+                        logger.debug(
+                            "_analyze_query_mode_simple CORRECTION_FAILED: label=%s error=%s",
+                            label, exc,
+                        )
+
+                result_contexts = {
+                    label: df.to_string(max_rows=max_result_rows)
+                    for label, df in query_results.items()
+                }
+
+            if not result_contexts:
+                logger.info("Falling back to sample mode after correction attempt failed")
+                fallback_result = await self._analyze_sample_mode(instruction, 50)
+                fallback_result.query_errors = query_errors
+                return fallback_result
+
         analysis_messages = build_analysis_messages(
             instruction=instruction,
             query_results=result_contexts,
@@ -333,6 +451,31 @@ class MultiFrameAgent:
             accumulated_results.update(new_results)
             accumulated_errors.update(new_errors)
 
+            # Pre-review: detect column KeyError and inject schema hint into
+            # reflection so next query generation uses correct column casing.
+            column_key_errors = {
+                label: err for label, err in new_errors.items()
+                if "KeyError" in err or (err.startswith("'") and err.endswith("'"))
+            }
+            if column_key_errors and not reflection:
+                schema_ctx = self._build_schema_context()
+                col_hints: list[str] = []
+                for lbl, schema_str in schema_ctx.items():
+                    for line in schema_str.splitlines():
+                        stripped = line.strip()
+                        if stripped.startswith("  ") or (stripped and ":" in stripped and not stripped.startswith("label") and not stripped.startswith("frame_id") and not stripped.startswith("shape")):
+                            col_hints.append(f"  frame `{lbl}`: {stripped}")
+                if col_hints:
+                    reflection = (
+                        "Column name KeyError detected. "
+                        "Use EXACT column names as shown in schema (case-sensitive):\n"
+                        + "\n".join(col_hints[:30])  # cap to avoid token overflow
+                    )
+                    logger.info(
+                        "_analyze_query_mode_iterative KEYERROR_HINT injected for labels: %s",
+                        list(column_key_errors.keys()),
+                    )
+
             review_messages = build_review_messages(
                 instruction=instruction,
                 queries_executed=accumulated_queries,
@@ -418,12 +561,18 @@ class MultiFrameAgent:
                 skip_labels = set()
                 only_labels = None
             elif verdict.status == "rejected":
-                accumulated_results.clear()
-                accumulated_queries.clear()
-                accumulated_errors.clear()
-                reflection = verdict.reflection
-                skip_labels = set()
-                only_labels = None
+                # Only clear if not the last iteration — preserve results for final analysis
+                if attempt < max_retries:
+                    accumulated_results.clear()
+                    accumulated_queries.clear()
+                    accumulated_errors.clear()
+                    reflection = verdict.reflection
+                    skip_labels = set()
+                    only_labels = None
+                else:
+                    logger.warning(
+                        "Last attempt rejected, but preserving accumulated results for final analysis"
+                    )
 
         final_messages = build_analysis_messages(
             instruction=instruction,
@@ -621,11 +770,28 @@ class MultiFrameAgent:
         return await writer.batch_enrich(operations)
 
     async def _call_llm(self, messages: list[dict[str, str]]) -> str:
+        model_name = self._model or ("claude-sonnet-4-20250514" if self._provider == "anthropic" else "gpt-4o")
+        logger.debug(
+            "multi_agent LLM_REQUEST: provider=%s model=%s messages=%d preview=%s",
+            self._provider,
+            model_name,
+            len(messages),
+            summarize_messages(messages),
+        )
         if self._provider == "anthropic":
-            return await self._call_anthropic(messages)
-        if self._provider == "openai":
-            return await self._call_openai(messages)
-        raise ValueError(f"Unknown provider: {self._provider}. Use 'anthropic' or 'openai'.")
+            raw = await self._call_anthropic(messages)
+        elif self._provider == "openai":
+            raw = await self._call_openai(messages)
+        else:
+            raise ValueError(f"Unknown provider: {self._provider}. Use 'anthropic' or 'openai'.")
+        logger.debug(
+            "multi_agent LLM_RESPONSE: provider=%s model=%s chars=%d preview=%s",
+            self._provider,
+            model_name,
+            len(raw),
+            truncate_text(raw),
+        )
+        return raw
 
     async def _call_anthropic(self, messages: list[dict[str, str]]) -> str:
         try:

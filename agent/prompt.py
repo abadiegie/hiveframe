@@ -442,6 +442,77 @@ def build_query_generation_messages(
     return messages
 
 
+def build_query_correction_messages(
+    instruction: str,
+    failed_queries: dict[str, str],
+    query_errors: dict[str, str],
+    frame_schemas: dict[str, str],
+) -> list[dict[str, str]]:
+    """Build correction prompt for failed pandas queries.
+
+    Gives the LLM the exact error messages and correct schema so it can
+    fix column name casing or other simple execution errors.
+
+    Args:
+        instruction: Original analysis instruction.
+        failed_queries: Dict label -> original query string that failed.
+        query_errors: Dict label -> error message from execution.
+        frame_schemas: Dict label -> schema context string (from _build_schema_context).
+
+    Returns:
+        List of message dicts ready to send to a chat LLM.
+    """
+    available_frames = list(frame_schemas.keys())
+    frames_list = ", ".join(f"`{f}`" for f in available_frames)
+
+    system = (
+        "You are a data analyst fixing failed pandas queries.\n\n"
+        "## CRITICAL: Available DataFrames (ONLY these)\n\n"
+        f"EXACTLY these frames exist: {frames_list}\n\n"
+        "## Rules\n\n"
+        "- Column names are CASE-SENSITIVE — use the EXACT name from the schema\n"
+        "- Each query MUST start with 'df'\n"
+        "- Only use pandas methods — no imports, no file I/O\n"
+        "- CRITICAL: frame_label in response MUST be exactly one of: "
+        f"{frames_list}\n\n"
+        "## Response format\n\n"
+        "Raw JSON only, same format as before:\n"
+        '{"queries":{"frame_label":"df.corrected_expression()"},'
+        '"reasoning":"what was wrong and how it was fixed"}'
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    # Schema context so LLM can see correct column names
+    schema_parts: list[str] = []
+    for label, schema_str in frame_schemas.items():
+        schema_parts.append(f"## DataFrame schema: `{label}`\n\n{schema_str}")
+    if schema_parts:
+        messages.append({
+            "role": "system",
+            "content": "\n\n---\n\n".join(schema_parts),
+        })
+
+    # Failed queries + errors as the user turn
+    error_lines = [f"## Original instruction\n\n{instruction}\n"]
+    error_lines.append("## Failed queries and errors\n")
+    for label, query_str in failed_queries.items():
+        error = query_errors.get(label, "unknown error")
+        error_lines.append(
+            f"**{label}:**\n"
+            f"  Query:  `{query_str}`\n"
+            f"  Error:  `{error}`"
+        )
+    error_lines.append(
+        "\nFix the queries above using the EXACT column names from the schema. "
+        "Column names are case-sensitive. "
+        "Return corrected queries in the same JSON format."
+    )
+
+    messages.append({"role": "user", "content": "\n".join(error_lines)})
+    return messages
+
+
 def build_review_messages(
     instruction: str,
     queries_executed: dict[str, str],
@@ -472,9 +543,13 @@ def build_review_messages(
             parts.append(f"**{label}:** `{query}`")
 
     if query_results:
-        parts.append("\n## Query results")
         for label, result_str in query_results.items():
-            parts.append(f"**{label}:**\n```\n{result_str}\n```")
+            query_used = queries_executed.get(label, "")
+            parts.append(
+                f"\n## Query result: `{label}`\n\n"
+                f"Query: `{query_used}`\n\n"
+                f"Result:\n```\n{result_str}\n```"
+            )
 
     if query_errors:
         parts.append("\n## Query errors")
