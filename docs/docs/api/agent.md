@@ -13,7 +13,26 @@ Hiveframe agent layer has four main interfaces:
 
 - `normalize(cell_id, value, confidence)` — Write a single cell with confidence
 - `batch_enrich(operations)` — Write a batch of cell updates
-- `stream_normalize(column, llm_call, chunk_size=50)` — Normalize a column in streaming chunks
+- `stream_normalize(column, llm_call, chunk_size=50, progress_callback=None, custom_instruction=None)` — Normalize a column in streaming chunks with optional custom prompt instruction
+
+### AgentWriter custom instruction
+
+`stream_normalize(...)` now accepts `custom_instruction` so you can control how the LLM interprets each chunk without replacing the built-in prompt format.
+
+```python
+result = await writer.stream_normalize(
+    column="city",
+    llm_call=llm_call,
+    chunk_size=25,
+    custom_instruction=(
+        "Normalize city values to official Indonesian province names. "
+        "Keep abbreviations only when they are the canonical form."
+    ),
+)
+```
+
+If `custom_instruction` is `None`, the default instruction remains:
+`Normalize column '{column}'`.
 
 ## RelationalAgentWriter Key Methods
 

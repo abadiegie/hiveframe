@@ -472,7 +472,17 @@ async def llm_call(messages):
     # Call your LLM here, return list of {cell_id, value, confidence}
     ...
 result = await writer.stream_normalize("city", llm_call, chunk_size=50)
+
+# Optional: provide task-specific instruction for better output quality
+result = await writer.stream_normalize(
+    "city",
+    llm_call,
+    chunk_size=50,
+    custom_instruction="Normalize city values to official Indonesian province names.",
+)
 ```
+
+See API details: [Agent API](api/agent.md#agentwriter-custom-instruction).
 
 ### Metrics Endpoint
 

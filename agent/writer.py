@@ -133,33 +133,42 @@ class AgentWriter:
         llm_call: Callable[[list[dict]], Awaitable[list[dict]]],
         chunk_size: int = 50,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        custom_instruction: str | None = None,
     ) -> dict:
         """
-        Normalize seluruh kolom secara streaming.
-        Kirim chunk_size rows per LLM call.
-        llm_call: async function(messages: list[dict]) -> list[dict] (LLM ops)
+        Normalize one column in streaming mode using chunked LLM calls.
+
+        Args:
+            column: Public column name to normalize.
+            llm_call: Async function(messages) -> list of write operations.
+            chunk_size: Number of rows sent per LLM call.
+            progress_callback: Optional callback(processed, total).
+            custom_instruction: Optional custom instruction passed to
+                `build_messages`. If None, uses
+                ``Normalize column '{column}'``.
         """
         df = self._coordinator.write_node._df
-        # Cari kolom yang sesuai namespace
+        # Find the internal namespaced column from the public column name.
         col_candidates = [c for c in df.columns if c.endswith(f"::{column}") or c == column]
         if not col_candidates:
             raise ValueError(f"Column '{column}' not found in DataFrame")
         col_name = col_candidates[0]
         total = len(df)
         written = 0
+        instruction = custom_instruction or f"Normalize column '{column}'"
         for start in range(0, total, chunk_size):
             chunk = df.iloc[start:start + chunk_size]
-            # Build snapshot hanya untuk chunk ini
+            # Build a snapshot for this chunk only.
             snapshot = chunk[[col_name]].to_string()
             from .prompt import build_messages
             messages = build_messages(
-                user_instruction=f"Normalize column '{column}'",
+                user_instruction=instruction,
                 dataframe_snapshot=snapshot,
                 frame_id=self._frame_id,
             )
-            # Call LLM untuk chunk ini
+            # Call LLM for this chunk.
             ops = await llm_call(messages)
-            # ops: list of dicts with cell_id, value, confidence
+            # ops: list[dict] with cell_id, value, confidence
             result = await self.batch_enrich(ops)
             written += result.get("written", 0)
             if progress_callback:
