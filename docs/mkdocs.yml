@@ -29,6 +29,7 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Agent:
+    - Stream Normalize: agent/stream-normalize.md
     - Columns Hint: agent/columns-hint.md
     - Relational Writer: agent/relational-writer.md
   - Guides:

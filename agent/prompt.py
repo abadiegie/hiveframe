@@ -477,4 +477,123 @@ def build_analysis_messages(
     return messages
 
 
+_NORMALIZE_SYSTEM_PROMPT = (
+    "You are a data normalization agent. Your task is to standardize and enrich values in a DataFrame.\n\n"
+    "## Context\n\n"
+    "You will receive:\n"
+    "1. A normalization instruction (e.g., 'standardize province names')\n"
+    "2. Chunk of rows from target column (with context columns)\n"
+    "3. Data patterns to help you standardize consistently\n\n"
+    "## Your job\n\n"
+    "For each row in the chunk:\n"
+    "1. Analyze the current value in context of other columns\n"
+    "2. Apply the normalization rule consistently\n"
+    "3. Return transformed value with confidence score\n\n"
+    "## Cell ID convention\n\n"
+    "Format: {frame_id}::{column_name}_{row_index}\n"
+    "- frame_id: unique identifier for the DataFrame\n"
+    "- column_name: target column being normalized\n"
+    "- row_index: zero-based row number\n"
+    "Example: 'abc123::city_5' means frame 'abc123', column 'city', row 5\n\n"
+    "## Confidence scoring\n\n"
+    "1.00 (certain):  Exact match or very clear transformation\n"
+    "0.80-0.94:       High confidence, minor ambiguity\n"
+    "0.60-0.79:       Medium confidence, some inference needed\n"
+    "<0.60:           Do NOT write — return empty operations\n\n"
+    "## Rules\n\n"
+    "- Always analyze all available context (other columns in same row)\n"
+    "- Never invent values — only transform what exists\n"
+    "- If transformation is unclear, set confidence <0.60 instead of guessing\n"
+    "- Be consistent: same input → same output across chunk\n"
+    "- Include reasoning for each value in the cell\n\n"
+    "## Response format\n\n"
+    "Respond with raw JSON (no markdown fences):\n"
+    "{\n"
+    '  "action": "batch_enrich",\n'
+    '  "reasoning": "narrative explanation of normalization logic",\n'
+    '  "operations": [\n'
+    "    {\n"
+    '      "cell_id": "{frame_id}::{column_name}_{row_index}",\n'
+    '      "value": "normalized_value",\n'
+    '      "confidence": 0.85,\n'
+    '      "cell_reasoning": "why this value at this row"\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
+
+
+def build_normalize_messages(
+    instruction: str,
+    chunk_snapshot: str,
+    frame_id: str,
+    column_name: str,
+    chunk_start: int,
+    context_columns: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """
+    Build LLM messages for stream_normalize with context awareness.
+
+    Args:
+        instruction: Normalization rule/instruction (e.g., "standardize to proper province names").
+        chunk_snapshot: String representation of the chunk (with target column + context).
+        frame_id: DFrame identifier for cell_id prefixing.
+        column_name: Name of the column being normalized.
+        chunk_start: Starting row index of this chunk.
+        context_columns: Optional list of context columns included (for display in prompt).
+
+    Returns:
+        List of messages ready to send to LLM.
+
+    Example::
+
+        chunk_str = df.iloc[0:10][['city', 'region', 'population']].to_string()
+        messages = build_normalize_messages(
+            instruction="Standardize city names to proper Indonesian city format",
+            chunk_snapshot=chunk_str,
+            frame_id="abc123",
+            column_name="city",
+            chunk_start=0,
+            context_columns=["city", "region", "population"],
+        )
+    """
+    messages: list[dict[str, str]] = [{"role": "system", "content": _NORMALIZE_SYSTEM_PROMPT}]
+
+    context_parts: list[str] = [
+        f"## Normalization Task\n\n{instruction}",
+        f"\n## Target Information\n\n"
+        f"Frame ID: `{frame_id}`\n"
+        f"Column: `{column_name}`\n"
+        f"Chunk rows: {chunk_start}-{chunk_start + (chunk_snapshot.count(chr(10)))} "
+        f"(0-based indexing)",
+    ]
+
+    if context_columns:
+        context_parts.append(
+            f"\n## Context Columns\n\n"
+            f"Use these columns to inform your normalization decision:\n"
+            f"{', '.join(f'`{c}`' for c in context_columns)}"
+        )
+
+    context_parts.append(
+        f"\n## Data to Normalize\n\n"
+        f"```\n{chunk_snapshot}\n```\n"
+        f"*Rows above are indexed starting from {chunk_start}. "
+        f"Use these row numbers in your cell_ids.*"
+    )
+
+    messages.append({"role": "system", "content": "\n".join(context_parts)})
+
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Normalize the '{column_name}' column according to the instruction above. "
+            f"Generate cell_ids using the row numbers shown (starting from {chunk_start}). "
+            f"Include reasoning for each normalized value."
+        ),
+    })
+
+    return messages
+
+
 
