@@ -13,26 +13,34 @@ Hiveframe agent layer has four main interfaces:
 
 - `normalize(cell_id, value, confidence)` — Write a single cell with confidence
 - `batch_enrich(operations)` — Write a batch of cell updates
-- `stream_normalize(column, llm_call, chunk_size=50, progress_callback=None, custom_instruction=None)` — Normalize a column in streaming chunks with optional custom prompt instruction
+- `stream_normalize(column, llm_call, chunk_size=50, progress_callback=None, custom_instruction=None)` — Normalize a column in streaming chunks with context-aware prompts
 
-### AgentWriter custom instruction
+### Stream Normalize
 
-`stream_normalize(...)` now accepts `custom_instruction` so you can control how the LLM interprets each chunk without replacing the built-in prompt format.
+`stream_normalize()` uses context-aware prompts that include actual data + all columns to help LLM make better normalization decisions. Features:
+
+- **Context-aware prompts**: Actual DataFrame snapshot with all columns for context
+- **Confidence scoring**: Only writes values with confidence ≥ 0.60
+- **Debug logging**: Full audit trail at every step for troubleshooting
+- **Custom instructions**: Flexible normalization rules per use case
+- **Progress tracking**: Optional callback for monitoring
+
+Example with custom instruction:
 
 ```python
 result = await writer.stream_normalize(
     column="city",
     llm_call=llm_call,
-    chunk_size=25,
+    chunk_size=50,
     custom_instruction=(
         "Normalize city values to official Indonesian province names. "
-        "Keep abbreviations only when they are the canonical form."
+        "Format: 'Province: City'. Examples: 'jkt' → 'DKI Jakarta: Jakarta Pusat'"
     ),
 )
 ```
 
-If `custom_instruction` is `None`, the default instruction remains:
-`Normalize column '{column}'`.
+For complete API reference, logging format, best practices, and debugging tips:
+**[Agent → Stream Normalize](../agent/stream-normalize.md)**
 
 ## RelationalAgentWriter Key Methods
 
