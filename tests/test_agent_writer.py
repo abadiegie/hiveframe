@@ -16,10 +16,10 @@ def test_stream_normalize_uses_default_instruction(monkeypatch):
         frame_id=df._frame_id,
     )
 
-    captured_user_instructions: list[str] = []
+    captured_messages: list[list[dict]] = []
 
     async def fake_llm_call(messages):
-        captured_user_instructions.append(messages[-1]["content"])
+        captured_messages.append(messages)
         return [{"cell_id": "ignored", "value": "x", "confidence": 0.9}]
 
     async def fake_batch_enrich(items):
@@ -30,7 +30,12 @@ def test_stream_normalize_uses_default_instruction(monkeypatch):
     result = asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=1))
 
     assert result["total"] == 2
-    assert captured_user_instructions == ["Normalize column 'city'", "Normalize column 'city'"]
+    # Check that default instruction is in the context message
+    assert len(captured_messages) == 2
+    for messages in captured_messages:
+        # System message should contain "Normalize column 'city'"
+        context_msg = [m for m in messages if m["role"] == "system" and "Normalize column" in m["content"]]
+        assert len(context_msg) > 0, f"Expected 'Normalize column 'city'' in context, got {messages}"
 
 
 def test_stream_normalize_uses_custom_instruction(monkeypatch):
@@ -43,10 +48,10 @@ def test_stream_normalize_uses_custom_instruction(monkeypatch):
     )
 
     custom_instruction = "Standardize city names to official province names in English."
-    captured_user_instructions: list[str] = []
+    captured_messages: list[list[dict]] = []
 
     async def fake_llm_call(messages):
-        captured_user_instructions.append(messages[-1]["content"])
+        captured_messages.append(messages)
         return [{"cell_id": "ignored", "value": "x", "confidence": 0.9}]
 
     async def fake_batch_enrich(items):
@@ -63,7 +68,11 @@ def test_stream_normalize_uses_custom_instruction(monkeypatch):
         )
     )
 
-    assert captured_user_instructions == [custom_instruction, custom_instruction]
+    # Check that custom instruction is included in context message
+    assert len(captured_messages) == 2
+    for messages in captured_messages:
+        context_msg = [m for m in messages if m["role"] == "system" and custom_instruction in m["content"]]
+        assert len(context_msg) > 0, f"Expected custom instruction in context, got {messages}"
 
 
 def test_stream_normalize_backwards_compatible_positional_progress(monkeypatch):
