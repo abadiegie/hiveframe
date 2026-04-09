@@ -304,14 +304,36 @@ def build_multi_frame_messages(
         "- Cite which frames support each finding\n"
         "- Include confidence for each insight (0.0-1.0)\n"
         "- If asked to write results, include operations array\n"
-        "  with cell_id, value, confidence per item\n\n"
+        "  with cell_id, value, confidence per item\n"
+        "- If the instruction asks for a chart or visualization, include a `series` array\n"
+        "  with the aggregated data ready for plotting. Use value_counts or groupby from\n"
+        "  the sample data shown. If sample size is too small, note it in analysis.\n\n"
         "## Response format\n\n"
         "Respond with raw JSON (no markdown fences):\n"
-        '{"action":"analyze|cross_reference|batch_enrich",'
-        '"reasoning":"...","analysis":"narrative text",'
-        '"insights":[{"finding":"...","frames":[...],'
-        '"confidence":0.0}],'
-        '"operations":[]}'
+        "{\n"
+        '  "action": "analyze|cross_reference|batch_enrich",\n'
+        '  "reasoning": "...",\n'
+        '  "analysis": "narrative text",\n'
+        '  "insights": [{"finding": "...", "frames": [...], "confidence": 0.0}],\n'
+        '  "series": [\n'
+        "    {\n"
+        '      "name": "snake_case_identifier",\n'
+        '      "description": "what this series shows",\n'
+        '      "suggested_x": "column_name",\n'
+        '      "suggested_y": "column_name",\n'
+        '      "suggested_group_by": null,\n'
+        '      "unit": "",\n'
+        '      "source_frames": ["frame_label"],\n'
+        '      "data": [{"col": "val"}, ...]\n'
+        "    }\n"
+        "  ],\n"
+        '  "operations": []\n'
+        "}\n\n"
+        "series rules:\n"
+        "- Include series ONLY when the instruction asks for a chart/visualization\n"
+        "- data must contain ACTUAL aggregated values from the sample shown\n"
+        "- max 50 rows per series\n"
+        "- If no visualization makes sense, series = []"
     )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
@@ -372,7 +394,11 @@ def build_query_generation_messages(
         "- Keep results focused - prefer top-N over all rows\n"
         "- CRITICAL: frame_label MUST be exactly one from available list above\n"
         "- CRITICAL: column names are CASE-SENSITIVE — use the EXACT column name from the schema\n"
-        "- Forbidden: import, exec, eval, open, os, sys, and any non-code text\n\n"
+        "- Forbidden: import, exec, eval, open, os, sys, and any non-code text\n"
+        "- For visualization requests (bar chart, pie chart, histogram, line chart, scatter, etc.):\n"
+        "  translate directly to an aggregation query — value_counts, groupby, describe, etc.\n"
+        "  Do NOT ask for clarification. Assume a sensible default (e.g. top-20 by count).\n"
+        "  Example: 'bar chart for Category' → df['Category'].value_counts().head(20)\n\n"
         "## Allowed pandas methods\n\n"
         "groupby, filter, query, nlargest, nsmallest, "
         "sort_values, head, tail, describe, value_counts, "
