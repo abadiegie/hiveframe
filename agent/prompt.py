@@ -468,6 +468,99 @@ def build_query_generation_messages(
     return messages
 
 
+def build_code_gen_messages(
+    instruction: str,
+    frame_schemas: dict[str, str],
+    attempt_history: list[dict] | None = None,
+) -> list[dict[str, str]]:
+    """Build messages for QueryExecutor code generation.
+
+    Args:
+        instruction: Original user instruction.
+        frame_schemas: Dict label -> schema string with sample values.
+        attempt_history: Previous failed attempts with label, code, and error.
+
+    Returns:
+        Message list ready to send to the LLM.
+    """
+    import re as _re
+
+    available_frames = list(frame_schemas.keys())
+    frames_list = ", ".join(f"`{f}`" for f in available_frames)
+
+    system = (
+        "You are a pandas query code generator for Hiveframe. Given DataFrame "
+        "schemas and a user instruction, generate executable Python pandas code "
+        "that assigns the final output to a variable named `result`.\n\n"
+        "## CRITICAL: Available DataFrames (ONLY these)\n\n"
+        f"EXACTLY these frames exist and can be queried: {frames_list}\n"
+        "Frame labels in your response MUST match one of the labels above.\n"
+        "Words in the instruction that are not frame labels are COLUMN NAMES, not new frames.\n\n"
+        "## Response format\n\n"
+        "Return one fenced Python block per frame, and the FIRST line inside each block "
+        "must be `# frame: <label>`. Example:\n\n"
+        "```python\n"
+        "# frame: data\n"
+        "result = df['Category'].value_counts().head(20).reset_index()\n"
+        "result.columns = ['category', 'count']\n"
+        "```\n\n"
+        "## Rules\n\n"
+        "- Assign the final output to a variable named `result`\n"
+        "- CRITICAL: the ONLY DataFrame variable available in code is `df`\n"
+        "- Do NOT write `data[...]`, `sales[...]`, or any frame label as a Python variable\n"
+        "- Use column names EXACTLY as shown in the schema - they are CASE-SENSITIVE\n"
+        "- Use only pandas operations on `df`\n"
+        "- Do not use imports, file I/O, exec, eval, open, os, sys, or subprocess\n"
+        "- Keep results aggregated and focused - prefer top-N over full frames\n"
+        "- For chart requests, do NOT ask clarifying questions. Assume a sensible aggregation "
+        "such as value_counts(), groupby(), or top-N counts\n"
+        "- Return code blocks only, with no prose before or after them\n\n"
+        "## Wrong vs correct\n\n"
+        "❌ WRONG:\n"
+        "```python\n"
+        "# frame: data\n"
+        "result = data['Category'].value_counts()\n"
+        "```\n\n"
+        "✅ CORRECT:\n"
+        "```python\n"
+        "# frame: data\n"
+        "result = df['Category'].value_counts()\n"
+        "```\n\n"
+        "## Allowed pandas methods\n\n"
+        "groupby, filter, query, nlargest, nsmallest, sort_values, head, tail, "
+        "describe, value_counts, merge, pivot_table, agg, apply, loc, iloc, "
+        "reset_index, rename, drop, dropna, fillna, astype"
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+
+    schema_parts: list[str] = []
+    for label, schema_str in frame_schemas.items():
+        schema_parts.append(f"## DataFrame schema: `{label}`\n\n{schema_str}")
+    if schema_parts:
+        messages.append({"role": "system", "content": "\n\n---\n\n".join(schema_parts)})
+
+    if attempt_history:
+        history_parts = [
+            "## Previous failed attempts",
+            "Fix the specific errors shown below. Use the exact frame labels and exact column names from the schema.",
+            "Remember: only `df` exists as a Python variable. Frame labels are metadata, not variable names.",
+        ]
+        for idx, attempt in enumerate(attempt_history, 1):
+            history_parts.append(
+                f"\n### Failed attempt {idx} — frame `{attempt.get('label', '?')}`\n"
+                f"Code:\n```python\n{attempt.get('code', '').strip()}\n```\n\n"
+                f"Traceback:\n```text\n{attempt.get('error', '').strip()}\n```"
+            )
+        messages.append({"role": "system", "content": "\n".join(history_parts)})
+
+    match = _re.search(r"User request:\s*\n(.+)", instruction, _re.DOTALL)
+    query_instruction = match.group(1).strip() if match else instruction.strip()
+
+    messages.append({"role": "user", "content": query_instruction})
+    return messages
+
+
 def build_query_correction_messages(
     instruction: str,
     failed_queries: dict[str, str],
@@ -657,7 +750,20 @@ def build_analysis_messages(
         )
 
     messages.append({"role": "system", "content": "\n\n---\n\n".join(result_parts)})
-    messages.append({"role": "user", "content": "Generate analysis based on the query results above."})
+
+    if query_results:
+        available = ", ".join(
+            f"`{label}` ({result_str.count(chr(10))} rows)"
+            for label, result_str in query_results.items()
+        )
+        user_content = (
+            f"Query results available: {available}. "
+            "Generate analysis based on the query results above."
+        )
+    else:
+        user_content = "Generate analysis based on the query results above."
+
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 

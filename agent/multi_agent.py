@@ -88,6 +88,287 @@ _FORBIDDEN_PATTERNS = (
 )
 
 
+def _parse_code_blocks(raw: str) -> dict[str, str]:
+    """Parse an LLM response into per-frame Python code blocks."""
+    import json
+
+    blocks: dict[str, str] = {}
+
+    for match in re.finditer(r"```python\s*\n(.*?)```", raw, re.DOTALL | re.IGNORECASE):
+        code = match.group(1).strip()
+        label_match = re.search(r"#\s*frame:\s*(\S+)", code)
+        if label_match:
+            label = label_match.group(1)
+            code = re.sub(r"#\s*frame:\s*\S+\s*\n?", "", code, count=1).strip()
+            blocks[label] = code
+
+    if blocks:
+        return blocks
+
+    try:
+        parsed = json.loads(raw.strip())
+        queries = parsed.get("queries", {})
+        if isinstance(queries, dict):
+            return {str(k): str(v) for k, v in queries.items()}
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            queries = parsed.get("queries", {})
+            if isinstance(queries, dict):
+                return {str(k): str(v) for k, v in queries.items()}
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return blocks
+
+
+def _replace_frame_label_variables(code: str, known_labels: set[str]) -> tuple[str, bool]:
+    """Rewrite obvious frame-label variables to the canonical ``df`` name."""
+    rewritten = code
+    changed = False
+
+    for label in sorted(known_labels, key=len, reverse=True):
+        if label == "df" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
+            continue
+        updated = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(label)}(?=\s*[\[\.])", "df", rewritten)
+        if updated != rewritten:
+            rewritten = updated
+            changed = True
+
+    return rewritten, changed
+
+
+def _replace_column_case_literals(code: str, columns: list[str]) -> tuple[str, bool]:
+    """Rewrite quoted column-name literals that are a case-only mismatch with real columns.
+
+    Works line-by-line so newlines in the original code are always preserved.
+    """
+    if not columns:
+        return code, False
+
+    canonical_by_lower: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for column in columns:
+        lower = column.lower()
+        if lower in canonical_by_lower and canonical_by_lower[lower] != column:
+            ambiguous.add(lower)
+            canonical_by_lower.pop(lower, None)
+            continue
+        if lower not in ambiguous:
+            canonical_by_lower[lower] = column
+
+    lines = code.split("\n")
+    changed = False
+    result_lines: list[str] = []
+    for line in lines:
+        new_line = line
+        for wrong_lower, correct in canonical_by_lower.items():
+            new_line = re.sub(
+                rf"(['\"]){re.escape(wrong_lower)}\1",
+                lambda m, c=correct: f"{m.group(1)}{c}{m.group(1)}",
+                new_line,
+                flags=re.IGNORECASE,
+            )
+        if new_line != line:
+            changed = True
+        result_lines.append(new_line)
+
+    return "\n".join(result_lines), changed
+
+
+def _rewrite_generated_code(
+    code: str,
+    frame_label: str,
+    columns: list[str],
+    known_labels: set[str],
+) -> tuple[str, list[str]]:
+    """Apply conservative local rewrites to generated code before execution."""
+    rewritten = code
+    applied: list[str] = []
+
+    updated, changed = _replace_frame_label_variables(rewritten, set(known_labels) | {frame_label})
+    if changed:
+        rewritten = updated
+        applied.append("frame_variable_to_df")
+
+    updated, changed = _replace_column_case_literals(rewritten, columns)
+    if changed:
+        rewritten = updated
+        applied.append("column_case_match")
+
+    return rewritten, applied
+
+
+class QueryExecutor:
+    """PandasAI-style self-healing query executor."""
+
+    MAX_RETRIES: int = 3
+
+    def __init__(
+        self,
+        frames: dict[str, "DFrame"],
+        call_llm,
+        build_schema,
+        safe_eval,
+        max_retries: int = 3,
+        max_result_rows: int = 200,
+    ) -> None:
+        self.frames = frames
+        self.call_llm = call_llm
+        self.build_schema = build_schema
+        self.safe_eval = safe_eval
+        self.max_retries = max_retries
+        self.max_result_rows = max_result_rows
+
+    async def run(
+        self,
+        instruction: str,
+    ) -> tuple[dict[str, "pd.DataFrame"], dict[str, str]]:
+        """Run code generation and self-healing execution."""
+        import traceback
+
+        from .prompt import build_code_gen_messages
+
+        schema_contexts = self.build_schema()
+        attempt_history: list[dict[str, str]] = []
+        results: dict[str, "pd.DataFrame"] = {}
+        errors: dict[str, str] = {}
+        pending: set[str] = set(self.frames.keys())
+
+        for attempt in range(self.max_retries):
+            if not pending:
+                break
+
+            messages = build_code_gen_messages(
+                instruction=instruction,
+                frame_schemas={k: v for k, v in schema_contexts.items() if k in pending},
+                attempt_history=[h for h in attempt_history if h.get("label") in pending],
+            )
+            raw = await self.call_llm(messages)
+            code_blocks = _parse_code_blocks(raw)
+
+            newly_failed: list[dict[str, str]] = []
+            seen_known_labels: set[str] = set()
+
+            for label, code in code_blocks.items():
+                label = str(label).strip()
+                code = str(code).strip()
+
+                frame = self.frames.get(label)
+                if frame is None:
+                    error = (
+                        f"Frame label '{label}' not found. Available frames: {list(self.frames.keys())}. "
+                        "Frame label MUST match exactly."
+                    )
+                    newly_failed.append({"label": label, "code": code, "error": error})
+                    errors[label] = error
+                    logger.debug(
+                        "QueryExecutor FAIL: attempt=%d label=%s\n%s",
+                        attempt + 1,
+                        label,
+                        error,
+                    )
+                    continue
+
+                if label not in pending:
+                    continue
+
+                seen_known_labels.add(label)
+                try:
+                    fresh = frame.read_fresh()
+                    rewritten_code, applied_rewrites = _rewrite_generated_code(
+                        code=code,
+                        frame_label=label,
+                        columns=[str(column) for column in fresh.columns],
+                        known_labels=set(self.frames.keys()),
+                    )
+                    if applied_rewrites:
+                        before_preview = truncate_text(" ".join(code.split()), 180)
+                        after_preview = truncate_text(" ".join(rewritten_code.split()), 180)
+                        logger.info(
+                            "QueryExecutor REWRITE: attempt=%d label=%s rewrites=%s",
+                            attempt + 1,
+                            label,
+                            applied_rewrites,
+                        )
+                        logger.debug(
+                            "QueryExecutor REWRITE_PREVIEW: attempt=%d label=%s before=%s after=%s delta=%+d",
+                            attempt + 1,
+                            label,
+                            before_preview,
+                            after_preview,
+                            len(rewritten_code) - len(code),
+                        )
+                    result_df = self.safe_eval(rewritten_code, fresh)
+                    results[label] = result_df.head(self.max_result_rows)
+                    errors.pop(label, None)
+                    pending.discard(label)
+                    logger.info(
+                        "QueryExecutor OK: attempt=%d label=%s rows=%d",
+                        attempt + 1,
+                        label,
+                        len(result_df),
+                    )
+                except Exception:
+                    full_tb = traceback.format_exc()
+                    if "NameError: name '" in full_tb and "' is not defined" in full_tb:
+                        full_tb += (
+                            "\nHint: only `df` is available as the DataFrame variable in generated code. "
+                            "Do not use frame labels like `data` or `sales` as Python variables."
+                        )
+                    newly_failed.append({"label": label, "code": code, "error": full_tb})
+                    errors[label] = full_tb
+                    if any(
+                        marker in full_tb
+                        for marker in (
+                            "Forbidden pattern",
+                            "Method '",
+                            "Query must start with 'df'",
+                            "Code block must assign final output to 'result'",
+                        )
+                    ):
+                        pending.discard(label)
+                    logger.debug(
+                        "QueryExecutor FAIL: attempt=%d label=%s\n%s",
+                        attempt + 1,
+                        label,
+                        full_tb,
+                    )
+
+            for label in sorted(pending - seen_known_labels):
+                error = (
+                    "No code block returned for this frame. Return one fenced Python block per frame "
+                    "with `# frame: <label>` as the first line."
+                )
+                newly_failed.append({"label": label, "code": "", "error": error})
+                errors[label] = error
+                logger.debug(
+                    "QueryExecutor FAIL: attempt=%d label=%s\n%s",
+                    attempt + 1,
+                    label,
+                    error,
+                )
+
+            attempt_history.extend(newly_failed)
+
+            if not seen_known_labels:
+                break
+
+            if newly_failed and pending:
+                logger.info(
+                    "QueryExecutor retry: attempt=%d/%d pending=%s",
+                    attempt + 1,
+                    self.max_retries,
+                    list(pending),
+                )
+
+        return results, errors
+
+
 class MultiFrameAgent:
     """LLM agent for analyzing one or multiple DFrame objects."""
 
@@ -146,13 +427,14 @@ class MultiFrameAgent:
         self._columns_hint = columns_hint
 
         if mode == "query":
-            # Always use iterative path; guarantee at least one correction pass.
-            effective_retries = max(1, max_retries)
-            result = await self._analyze_query_mode_iterative(
-                instruction,
-                max_result_rows,
-                effective_retries,
-            )
+            if max_retries > 0:
+                result = await self._analyze_query_mode_iterative(
+                    instruction,
+                    max_result_rows,
+                    max_retries,
+                )
+            else:
+                result = await self._analyze_query_mode_simple(instruction, max_result_rows)
         else:
             result = await self._analyze_sample_mode(instruction, max_sample_rows)
 
@@ -199,170 +481,43 @@ class MultiFrameAgent:
         return await self._analyze_query_mode_simple(instruction, max_result_rows)
 
     async def _analyze_query_mode_simple(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
-        from .prompt import build_analysis_messages, build_query_correction_messages, build_query_generation_messages
+        from .prompt import build_analysis_messages
 
-        schema_contexts = self._build_schema_context()
-        query_gen_messages = build_query_generation_messages(
-            instruction=instruction,
-            frame_schemas=schema_contexts,
+        executor = QueryExecutor(
+            frames=self._frames,
+            call_llm=self._call_llm,
+            build_schema=lambda: self._build_schema_context_with_samples(use_hint=False),
+            safe_eval=self._safe_eval,
+            max_retries=QueryExecutor.MAX_RETRIES,
+            max_result_rows=max_result_rows,
         )
+        query_results, query_errors = await executor.run(instruction)
 
-        raw_queries = await self._call_llm(query_gen_messages)
-        query_plan = parse_plan(raw_queries)
-        pandas_queries = query_plan.get("queries", {})
-        logger.debug(
-            "_analyze_query_mode_simple PARSED: queries=%d plan_keys=%s",
-            len(pandas_queries) if isinstance(pandas_queries, dict) else 0,
-            list(query_plan.keys()) if query_plan else "empty",
-        )
-        if not isinstance(pandas_queries, dict) or not pandas_queries:
-            logger.warning("LLM did not generate any queries, falling back to sample mode")
-            return await self._analyze_sample_mode(instruction, 50)
-
-        query_results: dict[str, "pd.DataFrame"] = {}
-        query_errors: dict[str, str] = {}
-
-        for label, query_str in pandas_queries.items():
-            query_str = str(query_str).strip()
-            label = str(label).strip()
-
-            # CRITICAL: Validate frame label matches exactly
-            frame = self._frames.get(label)
-            if frame is None:
-                available = list(self._frames.keys())
-                query_errors[label] = (
-                    f"Frame label '{label}' not found. Available frames: {available}. "
-                    f"Frame label MUST match exactly."
-                )
-                logger.warning(
-                    "_analyze_query_mode_simple FRAME_MISMATCH: requested_label=%s available_frames=%s",
-                    label,
-                    available,
-                )
-                continue
-
-            # Validate query format early
-            if not query_str.startswith("df"):
-                query_errors[label] = f"Invalid query format: must start with 'df', got '{query_str[:50]}'"
-                logger.debug(
-                    "_analyze_query_mode_simple INVALID_QUERY: label=%s query=%s",
-                    label,
-                    query_str[:80],
-                )
-                continue
-            try:
-                fresh = frame.read_fresh()
-                result_df = self._safe_eval(str(query_str), fresh)
-                query_results[label] = result_df.head(max_result_rows)
-                logger.debug(
-                    "_analyze_query_mode_simple EXEC_OK: label=%s query=%s rows=%d",
-                    label,
-                    query_str[:80],
-                    len(result_df),
-                )
-            except Exception as exc:
-                query_errors[label] = str(exc)
-                logger.debug(
-                    "_analyze_query_mode_simple EXEC_ERROR: label=%s query=%s error=%s",
-                    label,
-                    query_str[:80],
-                    str(exc),
-                )
+        if not query_results:
+            logger.info(
+                "_analyze_query_mode_simple NO_RESULTS after %d attempts, falling back to sample mode",
+                QueryExecutor.MAX_RETRIES,
+            )
+            fallback_result = await self._analyze_sample_mode(instruction, 50)
+            fallback_result.query_errors = query_errors
+            return fallback_result
 
         result_contexts = {
             label: result_df.to_string(max_rows=max_result_rows)
             for label, result_df in query_results.items()
         }
-        logger.debug(
-            "_analyze_query_mode_simple BUILD_ANALYSIS: result_contexts=%d total_context_chars=%d query_errors=%s",
-            len(result_contexts),
-            sum(len(v) for v in result_contexts.values()),
-            query_errors if query_errors else "none",
-        )
-
-        if not result_contexts and query_errors:
-            error_details = "; ".join(f"{label}: {err}" for label, err in query_errors.items())
-
-            # Detect frame mismatch errors specifically
-            frame_mismatch_errors = [e for e in query_errors.values() if "not found" in e]
-            if frame_mismatch_errors:
-                logger.error(
-                    "_analyze_query_mode_simple FRAME_MISMATCH_DETECTED: "
-                    "LLM generated query with wrong frame labels. "
-                    "Available: %s, Requested: %s. "
-                    "See prompt and few-shot examples.",
-                    list(self._frames.keys()),
-                    list(pandas_queries.keys()),
-                )
-
-            logger.warning(
-                "_analyze_query_mode_simple NO_RESULTS: all queries failed. "
-                "Available frames: %s, Query labels: %s. Errors: %s. "
-                "Ensure LLM generates valid pandas expressions starting with 'df'.",
-                list(self._frames.keys()),
-                list(pandas_queries.keys()),
-                error_details,
-            )
-
-            # Attempt one self-correction pass before falling back to sample mode
-            logger.info(
-                "_analyze_query_mode_simple CORRECTION_ATTEMPT: errors=%s",
-                query_errors,
-            )
-            correction_messages = build_query_correction_messages(
-                instruction=instruction,
-                failed_queries={k: str(v) for k, v in pandas_queries.items()},
-                query_errors=query_errors,
-                frame_schemas=schema_contexts,
-            )
-            raw_corrected = await self._call_llm(correction_messages)
-            corrected_plan = parse_plan(raw_corrected)
-            corrected_queries = corrected_plan.get("queries", {})
-
-            if isinstance(corrected_queries, dict) and corrected_queries:
-                for label, query_str in corrected_queries.items():
-                    query_str = str(query_str).strip()
-                    frame = self._frames.get(label)
-                    if frame is None:
-                        continue
-                    try:
-                        fresh = frame.read_fresh()
-                        result_df = self._safe_eval(query_str, fresh)
-                        query_results[label] = result_df.head(max_result_rows)
-                        query_errors.pop(label, None)
-                        logger.info(
-                            "_analyze_query_mode_simple CORRECTION_OK: label=%s", label
-                        )
-                    except Exception as exc:
-                        query_errors[label] = str(exc)
-                        logger.debug(
-                            "_analyze_query_mode_simple CORRECTION_FAILED: label=%s error=%s",
-                            label, exc,
-                        )
-
-                result_contexts = {
-                    label: df.to_string(max_rows=max_result_rows)
-                    for label, df in query_results.items()
-                }
-
-            if not result_contexts:
-                logger.info("Falling back to sample mode after correction attempt failed")
-                fallback_result = await self._analyze_sample_mode(instruction, 50)
-                fallback_result.query_errors = query_errors
-                return fallback_result
 
         analysis_messages = build_analysis_messages(
             instruction=instruction,
             query_results=result_contexts,
             query_errors=query_errors,
-            original_queries={k: str(v) for k, v in pandas_queries.items()},
+            original_queries={},
         )
 
         raw_analysis = await self._call_llm(analysis_messages)
         analysis_plan = parse_plan(raw_analysis)
 
         result = self._plan_to_result(analysis_plan)
-        result.queries_executed = {k: str(v) for k, v in pandas_queries.items()}
         result.query_errors = query_errors
         return result
 
@@ -379,7 +534,7 @@ class MultiFrameAgent:
             build_review_messages,
         )
 
-        schema_contexts = self._build_schema_context()
+        schema_contexts = self._build_schema_context(use_hint=False)
 
         accumulated_results: dict[str, str] = {}
         accumulated_queries: dict[str, str] = {}
@@ -458,7 +613,7 @@ class MultiFrameAgent:
                 if "KeyError" in err or (err.startswith("'") and err.endswith("'"))
             }
             if column_key_errors and not reflection:
-                schema_ctx = self._build_schema_context()
+                schema_ctx = self._build_schema_context(use_hint=False)
                 col_hints: list[str] = []
                 for lbl, schema_str in schema_ctx.items():
                     for line in schema_str.splitlines():
@@ -602,27 +757,41 @@ class MultiFrameAgent:
         return result
 
     def _safe_eval(self, query_str: str, df: "pd.DataFrame") -> "pd.DataFrame":
-        """Execute pandas expression dengan sandbox minimal."""
+        """Execute pandas code in a minimal sandbox."""
         import pandas as pd
 
         query_stripped = query_str.strip()
+        has_result_assignment = bool(re.search(r"(^|[\n;])\s*result\s*=", query_stripped))
 
         for pattern in _FORBIDDEN_PATTERNS:
             if pattern in query_stripped:
                 raise ValueError(f"Forbidden pattern '{pattern}' in query")
 
-        if not query_stripped.startswith("df"):
-            raise ValueError(f"Query must start with 'df'. Got: {query_stripped[:50]}")
+        if not query_stripped.startswith("df") and not has_result_assignment:
+            raise ValueError(
+                f"Query must start with 'df' or assign to 'result'. Got: {query_stripped[:50]}"
+            )
 
         for method in re.findall(r"\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", query_stripped):
             if method not in _ALLOWED_PANDAS_METHODS:
                 raise ValueError(f"Method '{method}' is not allowed")
 
-        result = eval(  # noqa: S307
-            query_stripped,
-            {"__builtins__": {}},
-            {"df": df, "pd": pd},
-        )
+        local_ns: dict[str, Any] = {"df": df, "pd": pd}
+        for frame_label in self._frames:
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", frame_label):
+                local_ns.setdefault(frame_label, df)
+
+        if "\n" in query_stripped or has_result_assignment:
+            exec(query_stripped, {"__builtins__": {}}, local_ns)  # noqa: S102
+            result = local_ns.get("result")
+            if result is None:
+                raise ValueError("Code block must assign final output to 'result'")
+        else:
+            result = eval(  # noqa: S307
+                query_stripped,
+                {"__builtins__": {}},
+                local_ns,
+            )
 
         if not isinstance(result, (pd.DataFrame, pd.Series)):
             raise ValueError(f"Query must return DataFrame or Series, got {type(result).__name__}")
@@ -636,12 +805,16 @@ class MultiFrameAgent:
         frame_result: pd.DataFrame = result
         return frame_result
 
-    def _build_schema_context(self) -> dict[str, str]:
+    def _build_schema_context(self, use_hint: bool = True) -> dict[str, str]:
         """Build schema + statistics context without sample rows."""
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
             fresh = frame.read_fresh()
-            hint_cols = self._columns_hint.get(label) if self._columns_hint is not None else None
+            hint_cols = (
+                self._columns_hint.get(label)
+                if use_hint and self._columns_hint is not None
+                else None
+            )
 
             parts = [
                 f"label: {label}",
@@ -694,6 +867,87 @@ class MultiFrameAgent:
                         desc = schema.description or schema.dtype
                         parts.append(f"  {col}: {desc}")
 
+            contexts[label] = "\n".join(parts)
+
+        return contexts
+
+    def _build_schema_context_with_samples(
+        self,
+        n_sample: int = 3,
+        use_hint: bool = True,
+    ) -> dict[str, str]:
+        """Build schema context with sample values for self-healing query generation."""
+        contexts: dict[str, str] = {}
+        for label, frame in self._frames.items():
+            fresh = frame.read_fresh()
+            hint_cols = (
+                self._columns_hint.get(label)
+                if use_hint and self._columns_hint
+                else None
+            )
+
+            parts = [
+                f"label: {label}",
+                f"frame_id: {frame._frame_id}",
+                f"shape: {len(fresh):,} rows x {len(fresh.columns)} columns",
+            ]
+
+            if hint_cols is not None:
+                available = [col for col in hint_cols if col in fresh.columns]
+                missing = [col for col in hint_cols if col not in fresh.columns]
+                if missing:
+                    logger.warning(
+                        "_build_schema_context_with_samples: columns not found in frame '%s': %s",
+                        label,
+                        missing,
+                    )
+                if not available:
+                    logger.warning(
+                        "_build_schema_context_with_samples: no valid hint columns for frame '%s', "
+                        "falling back to all columns",
+                        label,
+                    )
+                    available = list(fresh.columns)
+                    parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+                else:
+                    parts.append("\nRelevant columns (use these for queries):")
+                    for col in available:
+                        dtype = fresh[col].dtype
+                        n_unique = fresh[col].nunique(dropna=True)
+                        parts.append(f"  {col}: {dtype} ({n_unique:,} unique values)")
+
+                    other_cols = [col for col in fresh.columns if col not in available]
+                    if other_cols:
+                        parts.append("\nOther available columns (not selected for this analysis):")
+                        parts.append(f"  {other_cols}")
+            else:
+                available = list(fresh.columns)
+                parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+
+            sample_rows = fresh[available].head(n_sample)
+            parts.extend(
+                [
+                    f"\ncolumns used for this query: {available}",
+                    "",
+                    "Column details (name | dtype | sample values):",
+                ]
+            )
+
+            for col in available:
+                try:
+                    samples = fresh[col].dropna().head(n_sample).tolist()
+                    samples_str = ", ".join(repr(sample) for sample in samples) if samples else "—"
+                except Exception:
+                    samples_str = "—"
+                parts.append(f"  {col} | {fresh[col].dtype} | {samples_str}")
+
+            parts.extend(
+                [
+                    "",
+                    f"Sample rows (first {min(n_sample, len(sample_rows))}):",
+                    sample_rows.to_string(index=True),
+                ]
+            )
             contexts[label] = "\n".join(parts)
 
         return contexts
