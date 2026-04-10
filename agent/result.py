@@ -82,9 +82,34 @@ class SeriesSpec:
             "histogram": px.histogram,
         }
 
-        builder = _CHART_BUILDERS.get(chart_type.lower())
+        chart_lower = chart_type.lower()
+
+        if chart_lower == "heatmap":
+            import plotly.graph_objects as _go
+
+            if not self.suggested_x or not self.suggested_y or not self.suggested_group_by:
+                raise ValueError(
+                    "heatmap requires suggested_x, suggested_y, and suggested_group_by"
+                )
+            pivot = df.pivot(
+                index=self.suggested_group_by,
+                columns=self.suggested_x,
+                values=self.suggested_y,
+            )
+            fig = _go.Figure(
+                data=_go.Heatmap(
+                    z=pivot.values,
+                    x=list(pivot.columns),
+                    y=list(pivot.index),
+                    colorscale="Blues",
+                )
+            )
+            fig.update_layout(title=self.description, **{k: v for k, v in kwargs.items() if k not in ("data_frame",)})
+            return fig
+
+        builder = _CHART_BUILDERS.get(chart_lower)
         if builder is None:
-            supported = ", ".join(_CHART_BUILDERS.keys())
+            supported = ", ".join(list(_CHART_BUILDERS.keys()) + ["heatmap"])
             raise ValueError(f"Unknown chart_type '{chart_type}'. Supported: {supported}")
 
         return builder(**plot_kwargs)
