@@ -1056,7 +1056,9 @@ class MultiFrameAgent:
         client = anthropic.AsyncAnthropic(api_key=self._anthropic_api_key)
         model = self._model or "claude-sonnet-4-20250514"
 
-        system = next((msg["content"] for msg in messages if msg["role"] == "system"), None)
+        # Anthropic accepts only one `system` string — join all system messages.
+        system_parts = [msg["content"] for msg in messages if msg["role"] == "system"]
+        system = "\n\n".join(system_parts) if system_parts else None
         user_messages = [msg for msg in messages if msg["role"] != "system"]
 
         response = await client.messages.create(
