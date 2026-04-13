@@ -26,6 +26,7 @@ class SeriesSpec:
     suggested_x: str = ""
     suggested_y: str | list[str] = ""
     suggested_group_by: str | None = None
+    chart_type: str = "bar"  # Default chart type: bar, line, area, scatter, pie, histogram, heatmap
     unit: str = ""
     source_frames: list[str] = field(default_factory=list)
 
@@ -39,19 +40,22 @@ class SeriesSpec:
 
     def to_plotly_figure(
         self,
-        chart_type: str = "line",
+        chart_type: str | None = None,
         **kwargs: Any,
     ) -> "go.Figure":
         """Convert ke Plotly figure dengan chart_type yang user pilih.
 
         Args:
-            chart_type: "line"|"bar"|"scatter"|"area"|"pie"|"histogram"
+            chart_type: "line"|"bar"|"scatter"|"area"|"pie"|"histogram"|"heatmap"
+                       Jika None, gunakan self.chart_type (dari LLM response).
             **kwargs: Diteruskan ke plotly.express function.
 
         Raises:
             ImportError: kalau plotly tidak terinstall.
             ValueError: kalau chart_type tidak dikenali atau data kosong.
         """
+        # Use self.chart_type as fallback if chart_type not provided
+        effective_chart_type = chart_type or self.chart_type or "bar"
         try:
             import importlib as _importlib
             px = _importlib.import_module("plotly.express")
@@ -82,7 +86,7 @@ class SeriesSpec:
             "histogram": px.histogram,
         }
 
-        chart_lower = chart_type.lower()
+        chart_lower = effective_chart_type.lower()
 
         if chart_lower == "heatmap":
             import plotly.graph_objects as _go
@@ -110,20 +114,23 @@ class SeriesSpec:
         builder = _CHART_BUILDERS.get(chart_lower)
         if builder is None:
             supported = ", ".join(list(_CHART_BUILDERS.keys()) + ["heatmap"])
-            raise ValueError(f"Unknown chart_type '{chart_type}'. Supported: {supported}")
+            raise ValueError(f"Unknown chart_type '{effective_chart_type}'. Supported: {supported}")
 
         return builder(**plot_kwargs)
 
     def save_chart(
         self,
         path: str,
-        chart_type: str = "line",
+        chart_type: str | None = None,
         width: int = 900,
         height: int = 500,
         scale: float = 2.0,
         **kwargs: Any,
     ) -> str:
         """Render chart dan save sebagai PNG.
+
+        Args:
+            chart_type: Chart type ke gunakan. Jika None, gunakan self.chart_type.
 
         Returns:
             Absolute path dari file yang disimpan.
@@ -213,10 +220,14 @@ class MultiFrameResult:
     def to_plotly_figure(
         self,
         name: str,
-        chart_type: str = "line",
+        chart_type: str | None = None,
         **kwargs: Any,
     ) -> "go.Figure":
         """Get Plotly figure dari series tertentu.
+
+        Args:
+            name: Series name.
+            chart_type: Chart type ke gunakan. Jika None, gunakan default dari series.
 
         Raises:
             KeyError: kalau name tidak ditemukan.
@@ -255,10 +266,13 @@ class MultiFrameResult:
     def save_all_charts(
         self,
         output_dir: str = ".",
-        chart_type: str = "line",
+        chart_type: str | None = None,
         **kwargs: Any,
     ) -> dict[str, str]:
         """Save semua series sebagai PNG files.
+
+        Args:
+            chart_type: Chart type untuk semua series. Jika None, gunakan default dari masing-masing series.
 
         Returns:
             Dict name → absolute path. Series yang gagal di-skip.

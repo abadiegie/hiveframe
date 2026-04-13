@@ -240,6 +240,7 @@ class ChartGenerator:
             suggested_x=sx or "",
             suggested_y=sy,
             suggested_group_by=sgb,
+            chart_type=chart_type,
             unit="",
             source_frames=[self._frame_label],
         )

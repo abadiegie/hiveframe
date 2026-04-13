@@ -9,6 +9,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from ._llm_debug import summarize_messages, summarize_operations, truncate_text
+
 if TYPE_CHECKING:
     from core.dataframe import DFrame
 
@@ -235,13 +237,28 @@ class RelationalAgentWriter:
                 chosen_model = model or "claude-sonnet-4-20250514"
                 system = next((msg["content"] for msg in messages if msg["role"] == "system"), None)
                 user_messages = [msg for msg in messages if msg["role"] != "system"]
+                logger.debug(
+                    "relational LLM_REQUEST: provider=%s model=%s messages=%d preview=%s",
+                    provider,
+                    chosen_model,
+                    len(messages),
+                    summarize_messages(messages),
+                )
                 response = await client.messages.create(
                     model=chosen_model,
                     max_tokens=1000,
                     system=system,
                     messages=user_messages,
                 )
-                return response.content[0].text
+                raw = response.content[0].text
+                logger.debug(
+                    "relational LLM_RESPONSE: provider=%s model=%s chars=%d preview=%s",
+                    provider,
+                    chosen_model,
+                    len(raw),
+                    truncate_text(raw),
+                )
+                return raw
 
             return call_anthropic
 
@@ -261,8 +278,23 @@ class RelationalAgentWriter:
                     kwargs["max_completion_tokens"] = 1000
                 else:
                     kwargs["max_tokens"] = 1000
+                logger.debug(
+                    "relational LLM_REQUEST: provider=%s model=%s messages=%d preview=%s",
+                    provider,
+                    chosen_model,
+                    len(messages),
+                    summarize_messages(messages),
+                )
                 response = await client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content or ""
+                raw = response.choices[0].message.content or ""
+                logger.debug(
+                    "relational LLM_RESPONSE: provider=%s model=%s chars=%d preview=%s",
+                    provider,
+                    chosen_model,
+                    len(raw),
+                    truncate_text(raw),
+                )
+                return raw
 
             return call_openai
 
@@ -326,6 +358,13 @@ class RelationalAgentWriter:
                 raw = await llm_call(messages)
                 plan = parse_plan(raw)
                 operations = list(plan.get("operations", []))
+                logger.debug(
+                    "relational LLM_PARSED: chunk=%d-%d operations=%d preview=%s",
+                    i,
+                    i + len(chunk) - 1,
+                    len(operations),
+                    summarize_operations(operations),
+                )
             except Exception as exc:
                 logger.warning("LLM call failed for chunk %d-%d: %s", i, i + len(chunk) - 1, exc)
                 total_skipped += len(chunk)

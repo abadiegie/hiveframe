@@ -140,8 +140,10 @@ def test_analyze_query_with_hint_schema_context(frame_data: DFrame, monkeypatch:
     )
 
     first_blob = "\n".join(msg["content"] for msg in calls[0] if msg["role"] == "system")
-    assert "Relevant columns (use these for queries):" in first_blob
-    assert "city" in first_blob
+    # Query mode now always uses full schema (PandasAI-style) even when columns_hint is provided.
+    assert "Column dtypes:" in first_blob
+    assert "Relevant columns (use these for queries):" not in first_blob
+    assert "extra_col" in first_blob
 
 
 def test_analyze_query_without_hint_schema_context(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:

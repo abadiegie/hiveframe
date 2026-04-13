@@ -1114,6 +1114,13 @@ class MultiFrameAgent:
             if not clean_data:
                 logger.warning("Skipping series '%s': no valid data rows", raw_series.get("name", "?"))
                 continue
+            
+            # Extract chart_type, default to "bar" if not specified by LLM
+            chart_type = str(raw_series.get("chart_type", "bar")).lower()
+            if chart_type not in ("bar", "line", "area", "scatter", "pie", "histogram", "heatmap"):
+                logger.warning("Invalid chart_type '%s' for series '%s', using 'bar'", chart_type, raw_series.get("name", "?"))
+                chart_type = "bar"
+            
             series.append(SeriesSpec(
                 name=str(raw_series.get("name", f"series_{len(series)}")),
                 description=str(raw_series.get("description", "")),
@@ -1121,6 +1128,7 @@ class MultiFrameAgent:
                 suggested_x=str(raw_series.get("suggested_x", "")),
                 suggested_y=raw_series.get("suggested_y", ""),
                 suggested_group_by=raw_series.get("suggested_group_by"),
+                chart_type=chart_type,
                 unit=str(raw_series.get("unit", "")),
                 source_frames=list(raw_series.get("source_frames", [])),
             ))

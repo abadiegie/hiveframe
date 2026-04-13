@@ -3,11 +3,12 @@
 
 import asyncio
 import json
+import logging
 
 import pandas as pd
 import pytest
 
-from agent.multi_agent import MultiFrameAgent
+from agent.multi_agent import MultiFrameAgent, _rewrite_generated_code
 from agent.result import FrameInsight, MultiFrameResult
 from core.dataframe import DFrame
 
@@ -81,6 +82,29 @@ def test_safe_eval_series_converted_to_dataframe(frame_sales: DFrame) -> None:
     out = agent._safe_eval("df['city'].value_counts()", frame_sales.read_fresh())
     assert isinstance(out, pd.DataFrame)
     assert len(out.columns) == 2
+
+
+def test_safe_eval_accepts_frame_label_alias_for_generated_code(frame_sales: DFrame) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    out = agent._safe_eval(
+        "result = sales['city'].value_counts()",
+        frame_sales.read_fresh(),
+    )
+    assert isinstance(out, pd.DataFrame)
+    assert len(out.columns) == 2
+
+
+def test_rewrite_generated_code_rewrites_frame_variable_and_column_case(frame_sales: DFrame) -> None:
+    rewritten, applied = _rewrite_generated_code(
+        code="result = sales['CITY'].value_counts()",
+        frame_label="sales",
+        columns=list(frame_sales.read_fresh().columns),
+        known_labels={"sales"},
+    )
+
+    assert "result = df['city'].value_counts()" == rewritten
+    assert "frame_variable_to_df" in applied
+    assert "column_case_match" in applied
 
 
 def test_schema_context_contains_shape(frame_sales: DFrame) -> None:
@@ -183,11 +207,51 @@ def test_analyze_query_executes_generated_queries(frame_sales: DFrame, monkeypat
     assert "Query result: `sales`" in second_call_blob
 
 
+def test_analyze_query_self_heals_frame_label_variable(
+    frame_sales: DFrame,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    responses = [
+        "```python\n# frame: sales\nresult = sales['city'].value_counts()\n```",
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    caplog.set_level(logging.DEBUG, logger="hiveframe.agent.multi")
+    result = asyncio.run(agent.analyze("count cities", mode="query"))
+
+    assert result.analysis == "ok"
+    assert result.query_errors == {}
+    assert "QueryExecutor REWRITE_PREVIEW" in caplog.text
+
+
+def test_analyze_query_self_heals_column_case(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    responses = [
+        "```python\n# frame: sales\nresult = df['CITY'].value_counts()\n```",
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("count cities", mode="query"))
+
+    assert result.analysis == "ok"
+    assert result.query_errors == {}
+
+
 def test_analyze_query_unknown_frame_logged_as_error(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = MultiFrameAgent(frames={"sales": frame_sales})
     responses = [
         '{"queries":{"missing":"df.head(2)"},"reasoning":"q"}',
-        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+        '{"action":"analyze","analysis":"fallback-sample","insights":[],"operations":[]}',
     ]
 
     async def fake_call(messages: list[dict[str, str]]) -> str:
@@ -196,13 +260,15 @@ def test_analyze_query_unknown_frame_logged_as_error(frame_sales: DFrame, monkey
     monkeypatch.setattr(agent, "_call_llm", fake_call)
     result = asyncio.run(agent.analyze("x", mode="query"))
     assert "missing" in result.query_errors
+    # When frame is unknown, falls back to sample mode
+    assert result.analysis == "fallback-sample"
 
 
 def test_analyze_query_bad_pandas_query(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = MultiFrameAgent(frames={"sales": frame_sales})
     responses = [
         '{"queries":{"sales":"df.not_existing_method()"},"reasoning":"q"}',
-        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+        '{"action":"analyze","analysis":"fallback-sample","insights":[],"operations":[]}',
     ]
 
     async def fake_call(messages: list[dict[str, str]]) -> str:
@@ -211,7 +277,8 @@ def test_analyze_query_bad_pandas_query(frame_sales: DFrame, monkeypatch: pytest
     monkeypatch.setattr(agent, "_call_llm", fake_call)
     result = asyncio.run(agent.analyze("x", mode="query"))
     assert "sales" in result.query_errors
-    assert result.analysis == "ok"
+    # When query fails, falls back to sample mode
+    assert result.analysis == "fallback-sample"
 
 
 def test_analyze_query_fallback_to_sample_if_no_queries(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +337,31 @@ def test_unknown_provider_raises(frame_sales: DFrame) -> None:
     agent = MultiFrameAgent(frames={"sales": frame_sales}, provider="unknown")
     with pytest.raises(ValueError, match="Unknown provider"):
         asyncio.run(agent._call_llm([]))
+
+
+def test_call_llm_logs_debug_request_and_response(
+    frame_sales: DFrame,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales}, provider="openai", model="gpt-4o")
+
+    async def fake_openai(messages: list[dict[str, str]]) -> str:
+        return '{"action":"analyze","analysis":"ok"}'
+
+    monkeypatch.setattr(agent, "_call_openai", fake_openai)
+    caplog.set_level(logging.DEBUG, logger="hiveframe.agent.multi")
+
+    raw = asyncio.run(agent._call_llm([
+        {"role": "system", "content": "You are a tester."},
+        {"role": "user", "content": "Explain sales."},
+    ]))
+
+    assert raw == '{"action":"analyze","analysis":"ok"}'
+    assert "multi_agent LLM_REQUEST" in caplog.text
+    assert "Explain sales." in caplog.text
+    assert "multi_agent LLM_RESPONSE" in caplog.text
+    assert '"analysis":"ok"' in caplog.text
 
 
 def test_empty_frames_raises() -> None:

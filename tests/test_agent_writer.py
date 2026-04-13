@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 
 from agent.writer import AgentWriter
 from core.dataframe import DFrame
@@ -108,4 +109,34 @@ def test_stream_normalize_backwards_compatible_positional_progress(monkeypatch):
 
     assert result["total"] == 3
     assert progress_events == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_stream_normalize_logs_llm_debug(monkeypatch, caplog):
+    df = DFrame({"city": ["jakarta"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    async def fake_llm_call(messages):
+        return [{
+            "cell_id": f"{df._frame_id}::0::city",
+            "value": "Jakarta",
+            "confidence": 0.95,
+        }]
+
+    async def fake_batch_enrich(items):
+        return {"written": len(items), "skipped": 0}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+    caplog.set_level(logging.DEBUG, logger="hiveframe.agent.writer")
+
+    asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=1))
+
+    assert "stream_normalize LLM_CALL" in caplog.text
+    assert "Normalize column 'city'" in caplog.text
+    assert "stream_normalize LLM_RESPONSE" in caplog.text
+    assert "Jakarta" in caplog.text
 

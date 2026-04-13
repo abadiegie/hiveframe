@@ -11,6 +11,7 @@ from typing import Any, Callable, Awaitable, Optional
 
 from core.coordinator import TransactionCoordinator
 from core.transaction import Operation, TxState
+from ._llm_debug import summarize_messages, summarize_operations
 
 
 logger = logging.getLogger("hiveframe.agent.writer")
@@ -337,18 +338,20 @@ class AgentWriter:
             )
 
             logger.debug(
-                "stream_normalize LLM_CALL: chunk %d messages=%d",
+                "stream_normalize LLM_CALL: chunk %d messages=%d preview=%s",
                 chunk_idx + 1,
                 len(messages),
+                summarize_messages(messages),
             )
 
             # Call LLM for this chunk
             try:
                 ops = await llm_call(messages)
                 logger.debug(
-                    "stream_normalize LLM_RESPONSE: chunk %d operations=%d",
+                    "stream_normalize LLM_RESPONSE: chunk %d operations=%d preview=%s",
                     chunk_idx + 1,
                     len(ops) if ops else 0,
+                    summarize_operations(ops or []),
                 )
             except Exception as exc:
                 logger.error(

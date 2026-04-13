@@ -319,6 +319,7 @@ def build_multi_frame_messages(
         "    {\n"
         '      "name": "snake_case_identifier",\n'
         '      "description": "what this series shows",\n'
+        '      "chart_type": "bar|line|area|scatter|pie|histogram|heatmap",\n'
         '      "suggested_x": "column_name",\n'
         '      "suggested_y": "column_name",\n'
         '      "suggested_group_by": null,\n'
@@ -331,6 +332,7 @@ def build_multi_frame_messages(
         "}\n\n"
         "series rules:\n"
         "- Include series ONLY when the instruction asks for a chart/visualization\n"
+        "- Specify the appropriate chart_type: bar, line, area, scatter, pie, histogram, heatmap\n"
         "- data must contain ACTUAL aggregated values from the sample shown\n"
         "- max 50 rows per series\n"
         "- If no visualization makes sense, series = []"
