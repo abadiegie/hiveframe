@@ -2,10 +2,12 @@
 
 ## Overview
 
-Hiveframe provides two mechanisms for generating charts from DataFrames:
+Hiveframe provides two mechanisms for generating chart-ready data from DataFrames:
 
 1. **ChartGenerator** - Deterministic, no-LLM chart generation
 2. **MultiFrameAgent** - LLM-powered intelligent chart generation with analysis
+
+> hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.
 
 ## ChartGenerator — Programmatic Chart Creation
 
@@ -27,10 +29,9 @@ df = hf.DFrame({
 # Generate a bar chart
 gen = ChartGenerator(df, frame_label="sales")
 
-# Value counts (simple bar chart)
+# Value counts (simple bar chart data)
 series = gen.generate("bar", x="Category")
-fig = series.to_plotly_figure()
-fig.show()
+print(series.to_dict())
 
 # Aggregated bar chart with grouping
 series = gen.generate(
@@ -40,8 +41,7 @@ series = gen.generate(
     group_by="Region",
     agg="sum",
 )
-fig = series.to_plotly_figure()
-fig.show()
+print(series.to_dataframe())
 ```
 
 ### Supported Chart Types
@@ -94,30 +94,22 @@ Both `ChartGenerator` and `MultiFrameAgent` return `SeriesSpec` objects that sto
 ```python
 @dataclass
 class SeriesSpec:
-    name: str                            # snake_case identifier
-    description: str                     # chart title
-    data: list[dict[str, Any]]          # aggregated rows
-    suggested_x: str = ""               # x-axis column
-    suggested_y: str | list[str] = ""   # y-axis column(s)
-    suggested_group_by: str | None = None  # grouping column
-    chart_type: str = "bar"             # the chart type to use
-    unit: str = ""                      # y-axis unit label
-    source_frames: list[str] = []       # which frames contributed
+    label: str            # series identifier
+    x: list               # x-axis values
+    y: list               # y-axis values
+    x_label: str = ""     # x-axis label
+    y_label: str = ""     # y-axis label
+    series_type: str = "bar"  # chart hint only
 ```
 
-### Rendering Charts
+### Using Series Data
 
 ```python
-# Render with auto-detected chart type (from series.chart_type)
-fig = series.to_plotly_figure()
-fig.show()
+# Convert to dict for API responses or custom front-end renderers
+payload = series.to_dict()
 
-# Override chart type for this render
-fig = series.to_plotly_figure(chart_type="line")
-fig.show()
-
-# Save as PNG
-path = series.save_chart("output/my_chart.png")
+# Convert to DataFrame for pandas/matplotlib/seaborn/etc.
+df_plot = series.to_dataframe()
 ```
 
 ## MultiFrameAgent — Intelligent Chart Generation
@@ -149,17 +141,16 @@ async def main():
 
     print(result.analysis)
 
-    # Render the generated chart
+    # Use generated chart-ready data
     if result.series:
-        fig = result.series[0].to_plotly_figure()
-        fig.show()
+        print(result.series[0].to_dict())
 
 asyncio.run(main())
 ```
 
 ### How LLM Chooses Chart Type
 
-The LLM responds with JSON including a `chart_type` field:
+The LLM responds with JSON including a `series_type` field:
 
 ```json
 {
@@ -168,19 +159,18 @@ The LLM responds with JSON including a `chart_type` field:
   "analysis": "...",
   "series": [
     {
-      "name": "sales_by_region_over_time",
-      "description": "Sales trends by region",
-      "chart_type": "line",
-      "suggested_x": "Date",
-      "suggested_y": "Sales",
-      "suggested_group_by": "Region",
-      "data": [...]
+      "label": "sales_by_region_over_time",
+      "x": ["2026-01-01", "2026-01-02"],
+      "y": [100, 120],
+      "x_label": "Date",
+      "y_label": "Sales",
+      "series_type": "line"
     }
   ]
 }
 ```
 
-The `SeriesSpec` stores this `chart_type` and uses it as the default when rendering.
+The `SeriesSpec` stores this metadata as pure data so you can render it with any visualization stack.
 
 ## Chart Type Selection Guidelines
 
@@ -222,11 +212,8 @@ print(result.insights)         # Structured findings
 print(len(result.series))      # Number of charts generated
 
 for spec in result.series:
-    fig = spec.to_plotly_figure()
-    fig.show()
-
-# Save all charts to directory
-paths = result.save_all_charts("output/")
+    payload = spec.to_dict()
+    print(payload["label"], len(payload["x"]))
 ```
 
 ## Performance Tips
@@ -234,7 +221,7 @@ paths = result.save_all_charts("output/")
 ### ChartGenerator
 
 1. **Use top_n to limit output**: `top_n=20` returns only top 20 rows
-2. **Specify agg early**: `agg="sum"` aggregates before plotting
+2. **Specify agg early**: `agg="sum"` aggregates before export
 3. **No LLM overhead**: Zero latency compared to agent mode
 
 ### MultiFrameAgent
@@ -262,14 +249,14 @@ paths = result.save_all_charts("output/")
 ### SeriesSpec
 
 - `to_dataframe() -> pd.DataFrame` — Get aggregated data
-- `to_plotly_figure(chart_type=None) -> go.Figure` — Render chart
-- `save_chart(path, chart_type=None) -> str` — Save as PNG
+- `to_dict() -> dict` — Serialize chart-ready data
+- `from_dict(payload) -> SeriesSpec` — Deserialize series payload
 
 ### MultiFrameResult
 
-- `get_series(name: str) -> SeriesSpec | None` — Find series by name
-- `to_plotly_figure(name, chart_type=None) -> go.Figure` — Render specific chart
-- `save_all_charts(output_dir, chart_type=None) -> dict` — Save all charts
+- `get_series(name: str) -> SeriesSpec | None` — Find series by label
+- `to_dataframe(name: str) -> pd.DataFrame` — Convert one series to DataFrame
+- `to_dict() -> dict` — Serialize complete analysis output
 
 ---
 

@@ -317,24 +317,21 @@ def build_multi_frame_messages(
         '  "insights": [{"finding": "...", "frames": [...], "confidence": 0.0}],\n'
         '  "series": [\n'
         "    {\n"
-        '      "name": "snake_case_identifier",\n'
-        '      "description": "what this series shows",\n'
-        '      "chart_type": "bar|line|area|scatter|pie|histogram|heatmap",\n'
-        '      "suggested_x": "column_name",\n'
-        '      "suggested_y": "column_name",\n'
-        '      "suggested_group_by": null,\n'
-        '      "unit": "",\n'
-        '      "source_frames": ["frame_label"],\n'
-        '      "data": [{"col": "val"}, ...]\n'
+        '      "label": "series_name",\n'
+        '      "x": ["A", "B", "C"],\n'
+        '      "y": [10, 7, 4],\n'
+        '      "x_label": "column_name",\n'
+        '      "y_label": "metric_name",\n'
+        '      "series_type": "bar|line|area|scatter|pie|histogram|heatmap"\n'
         "    }\n"
         "  ],\n"
         '  "operations": []\n'
         "}\n\n"
         "series rules:\n"
         "- Include series ONLY when the instruction asks for a chart/visualization\n"
-        "- Specify the appropriate chart_type: bar, line, area, scatter, pie, histogram, heatmap\n"
-        "- data must contain ACTUAL aggregated values from the sample shown\n"
-        "- max 50 rows per series\n"
+        "- x and y must contain ACTUAL aggregated values from the sample shown\n"
+        "- x and y lengths must match\n"
+        "- max 50 points per series\n"
         "- If no visualization makes sense, series = []"
     )
 
@@ -702,24 +699,22 @@ _ANALYSIS_WITH_SERIES_PROMPT = (
     "  ],\n"
     '  "series": [\n'
     "    {\n"
-    '      "name": "snake_case_identifier",\n'
-    '      "description": "what this data shows",\n'
-    '      "suggested_x": "column_name",\n'
-    '      "suggested_y": "column_name or [list]",\n'
-    '      "suggested_group_by": "column_name or null",\n'
-    '      "unit": "IDR|units|%|etc or empty string",\n'
-    '      "source_frames": ["frame_label"],\n'
-    '      "data": [{"col": "val"}, ...]\n'
+    '      "label": "series_name",\n'
+    '      "x": ["A", "B", "C"],\n'
+    '      "y": [10, 7, 4],\n'
+    '      "x_label": "column_name",\n'
+    '      "y_label": "metric_name",\n'
+    '      "series_type": "bar|line|area|scatter|pie|histogram|heatmap"\n'
     "    }\n"
     "  ],\n"
     '  "operations": []\n'
     "}\n\n"
     "## Series rules\n\n"
     "- Include series ONLY when data is suitable for visualization\n"
-    "- name must be snake_case, unique, descriptive\n"
-    "- data must be the ACTUAL aggregated data from query results\n"
-    "- Keep data rows focused: max 200 rows per series\n"
-    '- suggested_y can be a list for multi-line charts e.g. ["revenue", "target"]\n'
+    "- label must be concise and descriptive\n"
+    "- x and y must be the ACTUAL aggregated arrays from query results\n"
+    "- x and y lengths must match\n"
+    "- Keep data focused: max 200 points per series\n"
     "- If no visualization makes sense, series = []\n"
     "- Do NOT invent data — only use data from query results\n"
 )

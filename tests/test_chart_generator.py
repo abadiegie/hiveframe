@@ -56,44 +56,44 @@ def test_suggest_config_unknown_raises(gen):
 def test_bar_value_counts(gen):
     series = gen.generate("bar", x="Category")
     assert isinstance(series, SeriesSpec)
-    assert series.suggested_x == "Category"
-    assert series.suggested_y == "count"
-    assert series.chart_type == "bar"
-    assert len(series.data) <= 20
-    assert all("Category" in row and "count" in row for row in series.data)
+    assert series.x_label == "Category"
+    assert series.y_label == "count"
+    assert series.series_type == "bar"
+    assert len(series.x) <= 20
+    assert len(series.x) == len(series.y)
 
 
 def test_bar_with_y(gen):
     series = gen.generate("bar", x="Category", y="Revenue", agg="sum")
-    assert series.suggested_y == "Revenue"
-    cats = {row["Category"] for row in series.data}
+    assert series.y_label == "Revenue"
+    cats = set(series.x)
     assert cats == {"A", "B", "C"}
 
 
 def test_bar_with_group_by(gen):
     series = gen.generate("bar", x="Category", y="Revenue", group_by="Region", agg="sum")
-    assert series.suggested_group_by == "Region"
-    assert "Region" in series.data[0]
+    assert series.y_label == "Revenue"
+    assert len(series.x) == len(series.y)
 
 
 def test_bar_top_n(gen):
     series = gen.generate("bar", x="Category", top_n=2)
-    assert len(series.data) == 2
+    assert len(series.x) == 2
 
 
 # -- generate: line / area --------------------------------------------
 
 def test_line(gen):
     series = gen.generate("line", x="Category", y="Revenue", agg="mean")
-    assert series.suggested_x == "Category"
-    assert series.suggested_y == "Revenue"
-    assert series.chart_type == "line"
+    assert series.x_label == "Category"
+    assert series.y_label == "Revenue"
+    assert series.series_type == "line"
 
 
 def test_area(gen):
     series = gen.generate("area", x="Category", y="Revenue")
-    assert series.suggested_x == "Category"
-    assert series.chart_type == "area"
+    assert series.x_label == "Category"
+    assert series.series_type == "area"
 
 
 def test_line_missing_y_raises(gen):
@@ -105,10 +105,10 @@ def test_line_missing_y_raises(gen):
 
 def test_scatter(gen):
     series = gen.generate("scatter", x="Revenue", y="Count")
-    assert series.suggested_x == "Revenue"
-    assert series.suggested_y == "Count"
-    assert series.chart_type == "scatter"
-    assert len(series.data) == 6
+    assert series.x_label == "Revenue"
+    assert series.y_label == "Count"
+    assert series.series_type == "scatter"
+    assert len(series.x) == 6
 
 
 def test_scatter_missing_raises(gen):
@@ -120,40 +120,39 @@ def test_scatter_missing_raises(gen):
 
 def test_pie_count(gen):
     series = gen.generate("pie", x="Category")
-    assert series.suggested_x == "Category"
-    assert series.suggested_y == "count"
-    assert series.chart_type == "pie"
+    assert series.x_label == "Category"
+    assert series.y_label == "count"
+    assert series.series_type == "pie"
 
 
 def test_pie_with_y(gen):
     series = gen.generate("pie", x="Category", y="Revenue", agg="sum")
-    assert series.suggested_y == "Revenue"
-    assert series.chart_type == "pie"
+    assert series.y_label == "Revenue"
+    assert series.series_type == "pie"
 
 
 # -- generate: histogram ----------------------------------------------
 
 def test_histogram(gen):
     series = gen.generate("histogram", x="Revenue")
-    assert series.suggested_x == "Revenue"
-    assert series.chart_type == "histogram"
-    assert len(series.data) == 6
+    assert series.x_label == "Revenue"
+    assert series.series_type == "histogram"
+    assert len(series.x) == 6
 
 
 # -- generate: heatmap ------------------------------------------------
 
 def test_heatmap_count(gen):
     series = gen.generate("heatmap", x="Category", group_by="Region")
-    assert series.suggested_x == "Category"
-    assert series.suggested_group_by == "Region"
-    assert series.suggested_y == "count"
-    assert series.chart_type == "heatmap"
+    assert series.x_label == "Category"
+    assert series.y_label == "count"
+    assert series.series_type == "heatmap"
 
 
 def test_heatmap_with_y(gen):
     series = gen.generate("heatmap", x="Category", y="Revenue", group_by="Region", agg="sum")
-    assert series.suggested_y == "Revenue"
-    assert series.chart_type == "heatmap"
+    assert series.y_label == "Revenue"
+    assert series.series_type == "heatmap"
 
 
 def test_heatmap_missing_group_by_raises(gen):
@@ -187,13 +186,12 @@ def test_auto_title(gen):
 
 def test_custom_title(gen):
     series = gen.generate("bar", x="Category", title="My Chart")
-    assert series.description == "My Chart"
-    assert series.name == "my_chart"
+    assert "my_chart" in series.label
 
 
 # -- source_frames ----------------------------------------------------
 
 def test_source_frames(gen):
     series = gen.generate("bar", x="Category")
-    assert series.source_frames == ["test_frame"]
+    assert series.label.endswith("_test_frame")
 

@@ -4,8 +4,7 @@
 """Simple deterministic chart generator — no LLM required.
 
 User picks columns and a chart type; pandas does the aggregation and the
-result is returned as a :class:`~agent.result.SeriesSpec` ready for
-rendering via Plotly or export.
+result is returned as a pure-data :class:`~agent.result.SeriesSpec`.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ class ChartGenerator:
     Args:
         source: A :class:`~core.dataframe.DFrame` or a plain
             ``pandas.DataFrame``.
-        frame_label: Label used in ``SeriesSpec.source_frames``.
+        frame_label: Label stored in the generated series label suffix.
 
     Example::
 
@@ -47,8 +46,7 @@ class ChartGenerator:
             agg="count",
             top_n=20,
         )
-        fig = series.to_plotly_figure(chart_type="bar")
-        fig.show()
+        payload = series.to_dict()
     """
 
     def __init__(
@@ -233,16 +231,31 @@ class ChartGenerator:
             len(result_df),
         )
 
+        y_column = sy[0] if isinstance(sy, list) and sy else (sy or "")
+        if isinstance(sy, list) and len(sy) > 1:
+            logger.debug(
+                "ChartGenerator.generate: multi-y result detected, using first y column '%s'",
+                y_column,
+            )
+
+        if sx and sx in result_df.columns:
+            x_values = result_df[sx].tolist()
+        else:
+            x_values = result_df.index.tolist()
+
+        if y_column and y_column in result_df.columns:
+            y_values = result_df[y_column].tolist()
+        else:
+            y_values = [None] * len(result_df)
+
+        series_label = f"{name}_{self._frame_label}" if self._frame_label else name
         return SeriesSpec(
-            name=name,
-            description=title,
-            data=result_df.to_dict(orient="records"),
-            suggested_x=sx or "",
-            suggested_y=sy,
-            suggested_group_by=sgb,
-            chart_type=chart_type,
-            unit="",
-            source_frames=[self._frame_label],
+            label=series_label,
+            x=x_values,
+            y=y_values,
+            x_label=sx or "",
+            y_label=str(y_column),
+            series_type=chart_type,
         )
 
     # ------------------------------------------------------------------

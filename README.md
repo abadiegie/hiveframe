@@ -9,6 +9,8 @@ Transactional, distributed-ready pandas-compatible DataFrame engine.
 
 **hiveframe** scales DataFrame workloads across many small machines with transactions, persistence, and AI agent support built in. No new paradigm to learn — just `import hiveframe as hf`.
 
+> hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.
+
 📖 **Full documentation: [abadiegie.github.io/hiveframe](https://abadiegie.github.io/hiveframe/)**
 
 ---
@@ -140,7 +142,6 @@ For full cluster setup including TCP/QUIC transport and SQLite/NATS registry, se
 ## Install extras
 
 ```bash
-pip install hiveframe[charts]     # Plotly chart rendering (SeriesSpec.to_plotly_figure)
 pip install hiveframe[excel]      # Excel import/export (openpyxl)
 pip install hiveframe[nats]       # NATS registry backend
 pip install hiveframe[quic]       # QUIC transport

@@ -113,7 +113,7 @@ def _parse_code_blocks(raw: str) -> dict[str, str]:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    match = re.search(r"\{[\s\S]*\}", raw)
+    match = re.search(r"\{[\s\S]*}", raw)
     if match:
         try:
             parsed = json.loads(match.group(0))
@@ -134,7 +134,7 @@ def _replace_frame_label_variables(code: str, known_labels: set[str]) -> tuple[s
     for label in sorted(known_labels, key=len, reverse=True):
         if label == "df" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
             continue
-        updated = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(label)}(?=\s*[\[\.])", "df", rewritten)
+        updated = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(label)}(?=\s*[\[.])", "df", rewritten)
         if updated != rewritten:
             rewritten = updated
             changed = True
@@ -1106,32 +1106,17 @@ class MultiFrameAgent:
 
         series: list[SeriesSpec] = []
         for raw_series in plan.get("series", []):
-            raw_data = raw_series.get("data", [])
-            if not isinstance(raw_data, list):
-                logger.warning("Skipping series '%s': data is not a list", raw_series.get("name", "?"))
+            if not isinstance(raw_series, dict):
                 continue
-            clean_data = [item for item in raw_data if isinstance(item, dict)]
-            if not clean_data:
-                logger.warning("Skipping series '%s': no valid data rows", raw_series.get("name", "?"))
+            try:
+                spec = SeriesSpec.from_dict(raw_series)
+            except Exception as exc:
+                logger.warning("Skipping invalid series payload: %s", exc)
                 continue
-            
-            # Extract chart_type, default to "bar" if not specified by LLM
-            chart_type = str(raw_series.get("chart_type", "bar")).lower()
-            if chart_type not in ("bar", "line", "area", "scatter", "pie", "histogram", "heatmap"):
-                logger.warning("Invalid chart_type '%s' for series '%s', using 'bar'", chart_type, raw_series.get("name", "?"))
-                chart_type = "bar"
-            
-            series.append(SeriesSpec(
-                name=str(raw_series.get("name", f"series_{len(series)}")),
-                description=str(raw_series.get("description", "")),
-                data=clean_data,
-                suggested_x=str(raw_series.get("suggested_x", "")),
-                suggested_y=raw_series.get("suggested_y", ""),
-                suggested_group_by=raw_series.get("suggested_group_by"),
-                chart_type=chart_type,
-                unit=str(raw_series.get("unit", "")),
-                source_frames=list(raw_series.get("source_frames", [])),
-            ))
+            if not spec.x and not spec.y:
+                logger.warning("Skipping series '%s': empty x/y data", spec.label)
+                continue
+            series.append(spec)
 
         return MultiFrameResult(
             action=str(plan.get("action", "analyze")),
