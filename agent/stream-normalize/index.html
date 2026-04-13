@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://abadiegie.github.io/hiveframe/agent/relational-writer/">
+        <link rel="canonical" href="https://abadiegie.github.io/hiveframe/agent/stream-normalize/">
       
       
-        <link rel="prev" href="../columns-hint/">
+        <link rel="prev" href="../../getting-started/">
       
       
-        <link rel="next" href="../../guides/iterative-agent/">
+        <link rel="next" href="../columns-hint/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Relational Writer - hiveframe</title>
+        <title>Stream Normalize - hiveframe</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#relationalagentwriter" class="md-skip">
+        <a href="#stream-normalize" class="md-skip">
           Skip to content
         </a>
       
@@ -114,7 +114,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Relational Writer
+              Stream Normalize
             
           </span>
         </div>
@@ -253,7 +253,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../stream-normalize/" class="md-tabs__link">
+        <a href="./" class="md-tabs__link">
           
   
   
@@ -465,10 +465,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../stream-normalize/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stream Normalize
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -484,6 +511,375 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#konsep" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Konsep
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fitur" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fitur
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt Structure
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prompt Structure">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#system-message" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        System Message
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#context-message" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Context Message
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#user-message" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User Message
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contoh-penggunaan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contoh Penggunaan
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Contoh Penggunaan">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#basic-standardize-city-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Basic: Standardize City Names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#with-progress-tracking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        With Progress Tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#small-chunk-for-small-context-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Small Chunk for Small Context Models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiple-columns-sequential" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multiple Columns (Sequential)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#confidence-threshold" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Confidence Threshold
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#best-practices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Best Practices
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Best Practices">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-custom-instructions-yang-jelas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Custom Instructions Yang Jelas
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-chunk-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Chunk Size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-temperature" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Temperature
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-monitor-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Monitor Logging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debugging">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#semua-rows-di-skip" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Semua rows di-skip
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rows-normalized-tapi-dengan-salah-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rows normalized tapi dengan salah value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#timeout-atau-slow-processing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timeout atau slow processing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#perbandingan-dengan-alternatives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Perbandingan dengan Alternatives
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limitations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limitations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changelog
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#v012-april-2026" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.2 (April 2026)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#v011-sebelumnya" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.1 (sebelumnya)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -521,37 +917,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Relational Writer
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../relational-writer/" class="md-nav__link">
         
   
   
@@ -567,253 +936,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#when-to-use" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        When to use
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#key-concepts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Key Concepts
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Key Concepts">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#framerelation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        FrameRelation
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#relation-types" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Relation Types
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#api-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        API Reference
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="API Reference">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#constructor" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Constructor
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#main-method" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Main Method
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#usage-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Usage Examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Usage Examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#example-1-comment-stance-many-to-one" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 1: Comment Stance (Many-to-One)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#example-2-post-review-category-one-to-many" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 2: Post Review Category (One-to-Many)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#example-3-self-referencing-nested-comments" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 3: Self-Referencing (Nested Comments)
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#context-format" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Context Format
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#response-format" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Response Format
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#confidence-threshold" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Confidence Threshold
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#progress-tracking" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Progress Tracking
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#performance-tips" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Performance Tips
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#error-handling" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Error Handling
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#runnable-example" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Runnable Example
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#see-also" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        See Also
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1167,10 +1289,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#when-to-use" class="md-nav__link">
+  <a href="#overview" class="md-nav__link">
     <span class="md-ellipsis">
       
-        When to use
+        Overview
       
     </span>
   </a>
@@ -1178,22 +1300,55 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#key-concepts" class="md-nav__link">
+  <a href="#konsep" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Key Concepts
+        Konsep
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Key Concepts">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fitur" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fitur
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt Structure
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prompt Structure">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#framerelation" class="md-nav__link">
+  <a href="#system-message" class="md-nav__link">
     <span class="md-ellipsis">
       
-        FrameRelation
+        System Message
       
     </span>
   </a>
@@ -1201,10 +1356,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#relation-types" class="md-nav__link">
+  <a href="#context-message" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Relation Types
+        Context Message
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#user-message" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User Message
       
     </span>
   </a>
@@ -1217,22 +1383,33 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#api-reference" class="md-nav__link">
+  <a href="#logging" class="md-nav__link">
     <span class="md-ellipsis">
       
-        API Reference
+        Logging
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="API Reference">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contoh-penggunaan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contoh Penggunaan
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Contoh Penggunaan">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#constructor" class="md-nav__link">
+  <a href="#basic-standardize-city-names" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Constructor
+        Basic: Standardize City Names
       
     </span>
   </a>
@@ -1240,10 +1417,32 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#main-method" class="md-nav__link">
+  <a href="#with-progress-tracking" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Main Method
+        With Progress Tracking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#small-chunk-for-small-context-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Small Chunk for Small Context Models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multiple-columns-sequential" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multiple Columns (Sequential)
       
     </span>
   </a>
@@ -1252,78 +1451,6 @@
         
       </ul>
     </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#usage-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Usage Examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Usage Examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#example-1-comment-stance-many-to-one" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 1: Comment Stance (Many-to-One)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#example-2-post-review-category-one-to-many" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 2: Post Review Category (One-to-Many)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#example-3-self-referencing-nested-comments" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Example 3: Self-Referencing (Nested Comments)
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#context-format" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Context Format
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#response-format" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Response Format
-      
-    </span>
-  </a>
   
 </li>
       
@@ -1339,10 +1466,121 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#progress-tracking" class="md-nav__link">
+  <a href="#best-practices" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Progress Tracking
+        Best Practices
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Best Practices">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-custom-instructions-yang-jelas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Custom Instructions Yang Jelas
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-chunk-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Chunk Size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-temperature" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Temperature
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-monitor-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Monitor Logging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debugging">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#semua-rows-di-skip" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Semua rows di-skip
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rows-normalized-tapi-dengan-salah-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rows normalized tapi dengan salah value
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#timeout-atau-slow-processing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Timeout atau slow processing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#perbandingan-dengan-alternatives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Perbandingan dengan Alternatives
       
     </span>
   </a>
@@ -1350,10 +1588,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#performance-tips" class="md-nav__link">
+  <a href="#limitations" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Performance Tips
+        Limitations
       
     </span>
   </a>
@@ -1361,35 +1599,41 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#error-handling" class="md-nav__link">
+  <a href="#changelog" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Error Handling
+        Changelog
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#v012-april-2026" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.1.2 (April 2026)
       
     </span>
   </a>
   
 </li>
-      
-        <li class="md-nav__item">
-  <a href="#runnable-example" class="md-nav__link">
+        
+          <li class="md-nav__item">
+  <a href="#v011-sebelumnya" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Runnable Example
+        v0.1.1 (sebelumnya)
       
     </span>
   </a>
   
 </li>
-      
-        <li class="md-nav__item">
-  <a href="#see-also" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        See Also
-      
-    </span>
-  </a>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -1413,428 +1657,348 @@
   
 
 
-<h1 id="relationalagentwriter">RelationalAgentWriter</h1>
-<p>Use <code>RelationalAgentWriter</code> to normalize a single target frame using cross-frame relational context.
-This enables LLM annotation workflows where each row's value depends on related data from other frames.</p>
-<h2 id="when-to-use">When to use</h2>
-<ul>
-<li>Annotating child rows that need parent context (e.g., comment stance depends on parent post)</li>
-<li>Enriching data that requires cross-frame lookup (e.g., comment → post → category)</li>
-<li>Multi-frame normalization where single-frame context is insufficient</li>
-<li>Self-referencing relations (e.g., nested comments: child → parent comment)</li>
-</ul>
-<h2 id="key-concepts">Key Concepts</h2>
-<h3 id="framerelation">FrameRelation</h3>
-<p>Defines a single cross-frame lookup rule.</p>
-<pre><code class="language-python">@dataclass
-class FrameRelation:
-    from_column: str           # Foreign key column in target frame
-    to_column: str             # Primary key column in context frame
-    context_frame: str         # Frame label to lookup from (or &quot;self&quot;)
-    include_columns: list[str] # Columns to include in context (empty = all)
-    relation_type: str         # &quot;many_to_one&quot; or &quot;one_to_many&quot;
-    context_label: str         # Display name in context (auto: context_frame)
-    max_related: int           # For one_to_many, max rows to include (default 10)
+<h1 id="stream-normalize">Stream Normalize</h1>
+<h2 id="overview">Overview</h2>
+<p><code>stream_normalize()</code> adalah method di <code>AgentWriter</code> untuk melakukan normalisasi kolom dengan LLM secara streaming. Digunakan untuk standardisasi, pembersihan, atau transformasi data pada skala besar tanpa membebani context window model.</p>
+<h2 id="konsep">Konsep</h2>
+<p>Sebelumnya, prompt yang dikirim ke LLM adalah <strong>generic/dummy</strong> — tidak contextual terhadap data actual:</p>
+<pre><code class="language-python"># OLD: Generic prompt
+&quot;Normalize column 'city' to proper format&quot;
+# LLM tidak melihat: tipe data, kolom lain, pola data
 </code></pre>
-<h3 id="relation-types">Relation Types</h3>
-<table>
-<thead>
-<tr>
-<th>Type</th>
-<th>Lookup</th>
-<th>Result</th>
-<th>Use Case</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>many_to_one</code></td>
-<td>One FK value</td>
-<td>At most 1 row</td>
-<td>Comment → Parent Post</td>
-</tr>
-<tr>
-<td><code>one_to_many</code></td>
-<td>One FK value</td>
-<td>Multiple rows (limited by <code>max_related</code>)</td>
-<td>Post → All Comments</td>
-</tr>
-<tr>
-<td>self-referencing</td>
-<td><code>context_frame="self"</code></td>
-<td>Lookup within same frame</td>
-<td>Nested Comments (child → parent)</td>
-</tr>
-</tbody>
-</table>
-<h2 id="api-reference">API Reference</h2>
-<h3 id="constructor">Constructor</h3>
-<pre><code class="language-python">RelationalAgentWriter(
-    target_frame: DFrame,
-    relations: list[FrameRelation],
-    context_frames: dict[str, DFrame] | None = None,
-    agent_id: str = &quot;relational_agent&quot;,
-    confidence_threshold: float = 0.6,
-    author_type: str = &quot;llm_normalization&quot;,
+<p>Sekarang menggunakan <strong>context-aware prompts</strong>:</p>
+<pre><code class="language-python"># NEW: Smart prompt dengan context
+- Instruction yang spesifik
+- Actual data chunk dengan semua kolom (untuk konteks)
+- Row numbers yang akurat
+- Type information per kolom
+- Sample patterns
+</code></pre>
+<p>Ini memungkinkan LLM membuat keputusan normalisasi yang lebih akurat dengan confidence score yang realitas.</p>
+<h2 id="fitur">Fitur</h2>
+<ul>
+<li>✅ <strong>Chunked processing</strong>: Kirim data dalam batch kecil untuk efisiensi token</li>
+<li>✅ <strong>Context-aware prompts</strong>: Data + konteks kolom lain untuk keputusan lebih baik</li>
+<li>✅ <strong>Confidence scoring</strong>: LLM menentukan confidence, hanya values confident yang ditulis</li>
+<li>✅ <strong>Debug logging</strong>: Full audit trail di logs untuk troubleshooting</li>
+<li>✅ <strong>Custom instructions</strong>: Instruction rule yang spesifik per use case</li>
+<li>✅ <strong>Progress tracking</strong>: Optional callback untuk monitor progress</li>
+</ul>
+<h2 id="api">API</h2>
+<pre><code class="language-python">async def stream_normalize(
+    self,
+    column: str,
+    llm_call: Callable[[list[dict]], Awaitable[list[dict]]],
+    chunk_size: int = 50,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    custom_instruction: str | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Normalize one column in streaming mode using chunked LLM calls.
+
+    Args:
+        column: Public column name to normalize.
+        llm_call: Async function that takes LLM messages and returns
+                  list of write operations. Example:
+                  async def my_llm_call(messages):
+                      response = await client.chat.completions.create(...)
+                      return parse_plan(response)[&quot;operations&quot;]
+        chunk_size: Number of rows per LLM call. Default 50.
+                    Reduce for smaller context windows (e.g., 10-20).
+        progress_callback: Optional callback(processed, total) for progress tracking.
+        custom_instruction: Natural language instruction for normalization.
+                           If None, uses &quot;Normalize column '{column}'&quot;.
+                           Example: &quot;Standardize province names to official format&quot;
+
+    Returns:
+        {
+            &quot;written&quot;: int,     # rows successfully written
+            &quot;skipped&quot;: int,     # rows skipped (low confidence)
+            &quot;total&quot;: int        # total rows processed
+        }
+    &quot;&quot;&quot;
+</code></pre>
+<h2 id="prompt-structure">Prompt Structure</h2>
+<p>Prompt yang dikirim ke LLM sekarang context-aware:</p>
+<h3 id="system-message">System Message</h3>
+<ul>
+<li>Role dan tanggung jawab agent</li>
+<li>Cell ID convention yang jelas</li>
+<li>Confidence scoring guidelines</li>
+<li>Rules untuk avoid hallucination</li>
+</ul>
+<h3 id="context-message">Context Message</h3>
+<ul>
+<li><strong>Normalization Task</strong>: Deskripsi instruction</li>
+<li><strong>Target Information</strong>: Frame ID, kolom target, range rows</li>
+<li><strong>Context Columns</strong>: Kolom lain yang bisa membantu keputusan</li>
+<li><strong>Data to Normalize</strong>: Actual data chunk (all columns)</li>
+</ul>
+<h3 id="user-message">User Message</h3>
+<ul>
+<li>Instruksi untuk normalize sesuai rule dengan row numbers yang akurat</li>
+</ul>
+<h2 id="logging">Logging</h2>
+<p>Setiap step dicatat dengan level DEBUG/INFO untuk transparency:</p>
+<pre><code>2026-04-09 21:22:40,300 INFO stream_normalize STARTED: column=city total_rows=1000 chunk_size=50
+2026-04-09 21:22:40,301 DEBUG stream_normalize CHUNK 1: rows 0-49 (size=50)
+2026-04-09 21:22:40,302 DEBUG stream_normalize CONTEXT: chunk 1 snapshot_lines=51 columns='city', 'region', 'population'
+2026-04-09 21:22:40,310 DEBUG stream_normalize LLM_CALL: chunk 1 messages=5
+2026-04-09 21:22:40,350 DEBUG stream_normalize LLM_RESPONSE: chunk 1 operations=45
+2026-04-09 21:22:40,351 DEBUG _build_operations STARTED: items=45
+2026-04-09 21:22:40,352 DEBUG _build_operations READING: cells=45 cell_ids=['...', '...', '...']
+2026-04-09 21:22:40,360 DEBUG _build_operations ACCEPT: idx=0 cell_id=abc123::city_0 old='jakarta' new='DKI Jakarta' confidence=0.9700
+2026-04-09 21:22:40,390 DEBUG _submit_with_retry SUBMIT: attempt=1/3 ops=45
+2026-04-09 21:22:40,400 INFO _submit_with_retry SUCCESS: attempt=1 tx_id=tx_xyz written=45 skipped=0 state=&lt;TxState.SYNCED&gt;
+2026-04-09 21:22:40,400 INFO stream_normalize BATCH_RESULT: chunk 1 written=45 skipped=0
+...
+2026-04-09 21:22:45,500 INFO stream_normalize FINISHED: total=1000 written=980 skipped=20 success_rate=98.0%
+</code></pre>
+<h2 id="contoh-penggunaan">Contoh Penggunaan</h2>
+<h3 id="basic-standardize-city-names">Basic: Standardize City Names</h3>
+<pre><code class="language-python">from openai import AsyncOpenAI
+from hiveframe.agent import AgentWriter
+from hiveframe.agent.prompt import parse_plan
+
+# Setup
+client = AsyncOpenAI(api_key=&quot;...&quot;)
+writer = AgentWriter(
+    coordinator=df._coordinator,
+    agent_id=&quot;city_standardizer&quot;,
+    frame_id=df._frame_id,
+)
+
+# LLM caller
+async def llm_call(messages):
+    response = await client.chat.completions.create(
+        model=&quot;gpt-4o&quot;,
+        messages=messages,
+        max_tokens=1000,
+        temperature=0.1,  # Low temp untuk konsistency
+    )
+    # Parse response
+    return parse_plan(response.choices[0].message.content).get(&quot;operations&quot;, [])
+
+# Normalize
+result = await writer.stream_normalize(
+    column=&quot;city&quot;,
+    llm_call=llm_call,
+    chunk_size=50,
+    custom_instruction=&quot;Standardize city names to proper Indonesian city format with province prefix. &quot;
+                       &quot;Examples: 'jakarta' → 'DKI Jakarta', 'bandung' → 'Jawa Barat: Bandung'&quot;
+)
+
+print(f&quot;Normalized {result['written']}/{result['total']} rows&quot;)
+</code></pre>
+<h3 id="with-progress-tracking">With Progress Tracking</h3>
+<pre><code class="language-python"># Progress callback
+def on_progress(processed, total):
+    pct = (processed / total * 100) if total &gt; 0 else 0
+    print(f&quot;Progress: {processed}/{total} ({pct:.1f}%)&quot;)
+
+result = await writer.stream_normalize(
+    column=&quot;city&quot;,
+    llm_call=llm_call,
+    chunk_size=50,
+    progress_callback=on_progress,
+    custom_instruction=&quot;Standardize city names to proper Indonesian city format&quot;
 )
 </code></pre>
-<p><strong>Parameters:</strong></p>
-<ul>
-<li><code>target_frame</code> — Frame to write results to</li>
-<li><code>relations</code> — List of <code>FrameRelation</code> definitions</li>
-<li><code>context_frames</code> — Dictionary of context frames by label (required if not all are "self")</li>
-<li><code>agent_id</code> — Agent ID for write operations</li>
-<li><code>confidence_threshold</code> — Minimum LLM confidence (0-1) to write a cell; default 0.6</li>
-<li><code>author_type</code> — Author type for write log; default "llm_normalization"</li>
-</ul>
-<p><strong>Raises:</strong></p>
-<ul>
-<li><code>ValueError</code> — If a relation references a <code>context_frame</code> not in <code>context_frames</code></li>
-</ul>
-<h3 id="main-method">Main Method</h3>
-<pre><code class="language-python">result = await writer.stream_normalize_relational(
-    target_column: str,
-    instruction: str,
-    chunk_size: int = 10,
-    provider: str = &quot;anthropic&quot;,
-    model: str | None = None,
-    anthropic_api_key: str | None = None,
-    openai_api_key: str | None = None,
-    on_progress: Callable[[int, int], None] | None = None,
-) -&gt; dict[str, int]
+<h3 id="small-chunk-for-small-context-models">Small Chunk for Small Context Models</h3>
+<pre><code class="language-python"># Untuk model kecil (Qwen 1.5B, Llama 3.2B, dll)
+# Gunakan chunk_size lebih kecil agar tetap dalam context window
+
+result = await writer.stream_normalize(
+    column=&quot;category&quot;,
+    llm_call=llm_call_small_model,
+    chunk_size=10,  # ← Lebih kecil dari default 50
+    custom_instruction=&quot;Normalize product categories ke standard ecommerce taxonomy&quot;
+)
 </code></pre>
-<p><strong>Parameters:</strong></p>
-<ul>
-<li><code>target_column</code> — Column to populate (created if missing)</li>
-<li><code>instruction</code> — Annotation guideline for the LLM (e.g., "Classify as positive, negative, or neutral")</li>
-<li><code>chunk_size</code> — Rows per LLM call; default 10 (balance between token cost and latency)</li>
-<li><code>provider</code> — LLM provider: <code>"anthropic"</code> or <code>"openai"</code></li>
-<li><code>model</code> — Model name (optional; uses provider default if not specified)</li>
-<li><code>anthropic_api_key</code> — For Anthropic provider; uses <code>ANTHROPIC_API_KEY</code> env var if None</li>
-<li><code>openai_api_key</code> — For OpenAI provider; uses <code>OPENAI_API_KEY</code> env var if None</li>
-<li><code>on_progress</code> — Callback: <code>on_progress(processed, total)</code> for progress tracking</li>
-</ul>
-<p><strong>Returns:</strong></p>
-<p>Dictionary with:</p>
-<ul>
-<li><code>"written"</code> — Number of cells successfully written</li>
-<li><code>"skipped"</code> — Number of cells skipped (low confidence or LLM error)</li>
-<li><code>"total"</code> — Total rows processed</li>
-</ul>
-<h2 id="usage-examples">Usage Examples</h2>
-<h3 id="example-1-comment-stance-many-to-one">Example 1: Comment Stance (Many-to-One)</h3>
-<p>Classify comment stance using parent post context.</p>
-<pre><code class="language-python">import asyncio
-import os
-import hiveframe as hf
-from hiveframe.agent import RelationalAgentWriter, FrameRelation
+<h3 id="multiple-columns-sequential">Multiple Columns (Sequential)</h3>
+<pre><code class="language-python"># Normalize beberapa kolom secara berurutan
+columns_to_normalize = [
+    (&quot;city&quot;, &quot;Standardize city names to proper Indonesian format&quot;),
+    (&quot;category&quot;, &quot;Normalize product categories to standard taxonomy&quot;),
+    (&quot;status&quot;, &quot;Standardize status values: active/inactive/pending&quot;),
+]
 
-async def main() -&gt; None:
-    # Posts frame
-    posts = hf.DFrame({
-        &quot;post_id&quot;: [1, 2, 3],
-        &quot;topic&quot;: [&quot;tech&quot;, &quot;politics&quot;, &quot;sports&quot;],
-        &quot;title&quot;: [&quot;New Python feature&quot;, &quot;Election 2026&quot;, &quot;World Cup&quot;],
-    })
-
-    # Comments frame (many comments per post)
-    comments = hf.DFrame({
-        &quot;comment_id&quot;: [101, 102, 103, 104],
-        &quot;post_id&quot;: [1, 1, 2, 3],
-        &quot;text&quot;: [&quot;Great!&quot;, &quot;Not useful&quot;, &quot;Vote now&quot;, &quot;Amazing game&quot;],
-        &quot;stance&quot;: [None, None, None, None],  # To be filled
-    })
-
-    # Define relation: each comment points to one post
-    relation = FrameRelation(
-        from_column=&quot;post_id&quot;,
-        to_column=&quot;post_id&quot;,
-        context_frame=&quot;posts&quot;,
-        include_columns=[&quot;topic&quot;, &quot;title&quot;],  # Only relevant columns
-        relation_type=&quot;many_to_one&quot;,
-        context_label=&quot;Parent Post&quot;,
+for col, instruction in columns_to_normalize:
+    result = await writer.stream_normalize(
+        column=col,
+        llm_call=llm_call,
+        chunk_size=50,
+        custom_instruction=instruction,
     )
-
-    # Create writer
-    writer = RelationalAgentWriter(
-        target_frame=comments,
-        relations=[relation],
-        context_frames={&quot;posts&quot;: posts},
-        confidence_threshold=0.7,
-    )
-
-    # Annotate stance column
-    result = await writer.stream_normalize_relational(
-        target_column=&quot;stance&quot;,
-        instruction=&quot;Classify comment stance toward the post topic as: positive, negative, or neutral&quot;,
-        chunk_size=5,
-        provider=&quot;anthropic&quot;,
-        anthropic_api_key=os.getenv(&quot;ANTHROPIC_API_KEY&quot;),
-        on_progress=lambda p, t: print(f&quot;Progress: {p}/{t}&quot;),
-    )
-
-    print(f&quot;Result: {result}&quot;)
-    # Expected: {&quot;written&quot;: 4, &quot;skipped&quot;: 0, &quot;total&quot;: 4}
-
-    # Read results
-    updated = comments.read_fresh()
-    print(updated[[&quot;comment_id&quot;, &quot;text&quot;, &quot;stance&quot;]])
-
-asyncio.run(main())
+    print(f&quot;{col}: {result['written']}/{result['total']} written&quot;)
 </code></pre>
-<h3 id="example-2-post-review-category-one-to-many">Example 2: Post Review Category (One-to-Many)</h3>
-<p>Classify post category using aggregate info from related comments.</p>
-<pre><code class="language-python">import asyncio
-import os
-import hiveframe as hf
-from hiveframe.agent import RelationalAgentWriter, FrameRelation
-
-async def main() -&gt; None:
-    # Posts (target)
-    posts = hf.DFrame({
-        &quot;post_id&quot;: [1, 2, 3],
-        &quot;title&quot;: [&quot;Python Tips&quot;, &quot;Election News&quot;, &quot;Sports&quot;],
-        &quot;category&quot;: [None, None, None],  # To be filled
-    })
-
-    # Comments (context)
-    comments = hf.DFrame({
-        &quot;comment_id&quot;: [101, 102, 103, 104, 105],
-        &quot;post_id&quot;: [1, 1, 2, 2, 3],
-        &quot;text&quot;: [
-            &quot;Good guide&quot;,
-            &quot;Very helpful&quot;,
-            &quot;Breaking news&quot;,
-            &quot;Important&quot;,
-            &quot;Exciting match&quot;,
-        ],
-    })
-
-    # Define relation: each post has many comments
-    relation = FrameRelation(
-        from_column=&quot;post_id&quot;,
-        to_column=&quot;post_id&quot;,
-        context_frame=&quot;comments&quot;,
-        include_columns=[&quot;text&quot;],  # Include comment texts
-        relation_type=&quot;one_to_many&quot;,
-        context_label=&quot;User Comments&quot;,
-        max_related=5,  # Show up to 5 comments per post
-    )
-
-    writer = RelationalAgentWriter(
-        target_frame=posts,
-        relations=[relation],
-        context_frames={&quot;comments&quot;: comments},
-    )
-
-    result = await writer.stream_normalize_relational(
-        target_column=&quot;category&quot;,
-        instruction=(
-            &quot;Based on post title and comment texts, categorize the post as: &quot;
-            &quot;technology, news, or entertainment&quot;
-        ),
-        chunk_size=10,
-        provider=&quot;anthropic&quot;,
-    )
-
-    print(f&quot;Result: {result}&quot;)
-
-    # Read results
-    updated = posts.read_fresh()
-    print(updated[[&quot;post_id&quot;, &quot;title&quot;, &quot;category&quot;]])
-
-asyncio.run(main())
-</code></pre>
-<h3 id="example-3-self-referencing-nested-comments">Example 3: Self-Referencing (Nested Comments)</h3>
-<p>Classify comment type based on parent comment context (comments may reply to other comments).</p>
-<pre><code class="language-python">import asyncio
-import os
-import hiveframe as hf
-from hiveframe.agent import RelationalAgentWriter, FrameRelation
-
-async def main() -&gt; None:
-    # Nested comments (some are replies to other comments)
-    comments = hf.DFrame({
-        &quot;comment_id&quot;: [1, 2, 3, 4, 5],
-        &quot;parent_id&quot;: [None, 1, 1, 2, 3],  # None = top-level, else parent comment_id
-        &quot;text&quot;: [
-            &quot;Main observation&quot;,
-            &quot;I agree!&quot;,
-            &quot;I disagree&quot;,
-            &quot;Good point&quot;,
-            &quot;Not relevant&quot;,
-        ],
-        &quot;type&quot;: [None, None, None, None, None],  # To be filled: &quot;original&quot;, &quot;agreement&quot;, &quot;rebuttal&quot;
-    })
-
-    # Define self-referencing relation: reply → parent comment
-    relation = FrameRelation(
-        from_column=&quot;parent_id&quot;,
-        to_column=&quot;comment_id&quot;,
-        context_frame=&quot;self&quot;,  # Lookup within same frame
-        include_columns=[&quot;text&quot;],
-        relation_type=&quot;many_to_one&quot;,
-        context_label=&quot;Parent Comment&quot;,
-    )
-
-    writer = RelationalAgentWriter(
-        target_frame=comments,
-        relations=[relation],
-        confidence_threshold=0.65,
-    )
-
-    result = await writer.stream_normalize_relational(
-        target_column=&quot;type&quot;,
-        instruction=(
-            &quot;Classify this comment as: 'original' (top-level), &quot;
-            &quot;'agreement' (supports parent), or 'rebuttal' (opposes parent)&quot;
-        ),
-        chunk_size=5,
-        provider=&quot;anthropic&quot;,
-    )
-
-    print(f&quot;Result: {result}&quot;)
-
-    updated = comments.read_fresh()
-    print(updated[[&quot;comment_id&quot;, &quot;parent_id&quot;, &quot;text&quot;, &quot;type&quot;]])
-
-asyncio.run(main())
-</code></pre>
-<h2 id="context-format">Context Format</h2>
-<p>The LLM receives enriched context like this:</p>
-<pre><code>Row 0 (comment_id=101, post_id=1, text=Great!):
-  Data:
-    comment_id: 101
-    post_id: 1
-    text: Great!
-    stance: None
-
-  [Parent Post] (lookup post_id=1):
-    post_id: 1
-    topic: tech
-    title: New Python feature
-
-Row 1 (comment_id=102, post_id=1, text=Not useful):
-  Data:
-    comment_id: 102
-    post_id: 1
-    text: Not useful
-    stance: None
-
-  [Parent Post] (lookup post_id=1):
-    post_id: 1
-    topic: tech
-    title: New Python feature
-</code></pre>
-<p>For one-to-many relations:</p>
-<pre><code>Row 0 (post_id=1, title=Python Tips):
-  Data:
-    post_id: 1
-    title: Python Tips
-    category: None
-
-  [User Comments] (2 found, max 5 shown):
-    1. comment_id: 101, text: Good guide
-    2. comment_id: 102, text: Very helpful
-</code></pre>
-<h2 id="response-format">Response Format</h2>
-<p>The LLM must return raw JSON:</p>
-<pre><code class="language-json">{
-  &quot;action&quot;: &quot;batch_enrich&quot;,
-  &quot;reasoning&quot;: &quot;Based on parent post topic and comment sentiment...&quot;,
-  &quot;operations&quot;: [
-    {
-      &quot;cell_id&quot;: &quot;comments::stance_0&quot;,
-      &quot;value&quot;: &quot;positive&quot;,
-      &quot;confidence&quot;: 0.95
-    },
-    {
-      &quot;cell_id&quot;: &quot;comments::stance_1&quot;,
-      &quot;value&quot;: &quot;negative&quot;,
-      &quot;confidence&quot;: 0.87
-    }
-  ]
-}
-</code></pre>
-<p>Only operations with <code>confidence &gt;= confidence_threshold</code> are written.</p>
 <h2 id="confidence-threshold">Confidence Threshold</h2>
-<p>By default, only cells with confidence ≥ 0.6 are written.</p>
+<p>Default confidence threshold: <strong>0.60</strong></p>
+<p>Hanya values dengan confidence ≥ 0.60 yang ditulis:</p>
 <table>
 <thead>
 <tr>
-<th>Range</th>
-<th>Interpretation</th>
+<th>Confidence</th>
+<th>Status</th>
+<th>Meaning</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>0.95-1.00</td>
+<td>✅ Write</td>
 <td>Very certain</td>
 </tr>
 <tr>
 <td>0.80-0.94</td>
-<td>Confident</td>
+<td>✅ Write</td>
+<td>High confidence</td>
 </tr>
 <tr>
 <td>0.60-0.79</td>
-<td>Moderate</td>
+<td>✅ Write</td>
+<td>Medium confidence</td>
 </tr>
 <tr>
-<td>&lt; 0.60</td>
-<td>Skipped (below threshold)</td>
+<td>&lt;0.60</td>
+<td>❌ Skip</td>
+<td>Too uncertain</td>
 </tr>
 </tbody>
 </table>
-<p>Adjust via constructor:</p>
-<pre><code class="language-python">writer = RelationalAgentWriter(
-    target_frame=comments,
-    relations=[relation],
-    context_frames={&quot;posts&quot;: posts},
-    confidence_threshold=0.8,  # Stricter: require 80%+ confidence
+<p>Jika LLM tidak confident, row di-skip (tidak diubah). Ini mencegah data corruption dari hallucination.</p>
+<p>Dapat dikonfigurasi via <code>AgentWriter</code>:</p>
+<pre><code class="language-python">writer = AgentWriter(
+    coordinator=df._coordinator,
+    confidence_threshold=0.75,  # Raise threshold untuk strictness
 )
 </code></pre>
-<h2 id="progress-tracking">Progress Tracking</h2>
-<p>Use <code>on_progress</code> callback to monitor processing:</p>
-<pre><code class="language-python">def on_progress(processed: int, total: int) -&gt; None:
-    pct = 100 * processed / total if total &gt; 0 else 0
-    print(f&quot;Progress: {processed}/{total} ({pct:.0f}%)&quot;)
-
-result = await writer.stream_normalize_relational(
-    target_column=&quot;stance&quot;,
-    instruction=&quot;...&quot;,
-    on_progress=on_progress,
-)
+<h2 id="best-practices">Best Practices</h2>
+<h3 id="1-custom-instructions-yang-jelas">1. Custom Instructions Yang Jelas</h3>
+<p>❌ Buruk:</p>
+<pre><code class="language-python">custom_instruction=&quot;Normalize city&quot;
 </code></pre>
-<h2 id="performance-tips">Performance Tips</h2>
-<ol>
-<li><strong>Chunk size</strong> — Larger chunks (e.g., 20-50) reduce API calls but increase token cost</li>
-<li><strong>Include columns</strong> — Limit context frame columns to only what's needed (token efficiency)</li>
-<li><strong>Confidence threshold</strong> — Stricter threshold (e.g., 0.8) means fewer writes but higher confidence</li>
-<li><strong>Cache building</strong> — One-time cache build at start; subsequent lookups are O(1)</li>
-</ol>
-<h2 id="error-handling">Error Handling</h2>
+<p>✅ Baik:</p>
+<pre><code class="language-python">custom_instruction=&quot;Standardize city names to official Indonesian city format &quot;
+                   &quot;with province prefix. Format: 'Province: City'. &quot;
+                   &quot;Example: 'jkt' → 'DKI Jakarta: Jakarta Pusat'&quot;
+</code></pre>
+<h3 id="2-chunk-size">2. Chunk Size</h3>
 <ul>
-<li>Per-chunk LLM errors are logged as warnings; processing continues with remaining chunks</li>
-<li>Missing <code>to_column</code> in context frame is logged; cache entry remains empty</li>
-<li>Missing <code>target_column</code> is created automatically</li>
-<li>Missing <code>include_columns</code> in context frame are silently skipped</li>
+<li><strong>Kecil (10-20)</strong>: Untuk model dengan context window kecil (8K tokens)</li>
+<li><strong>Medium (50)</strong>: Default, balanced untuk model standar</li>
+<li><strong>Besar (100+)</strong>: Untuk model dengan large context (32K+ tokens)</li>
 </ul>
-<p>Example error log:</p>
-<pre><code>LLM call failed for chunk 0-9: 429 rate limit exceeded
-chunk 10-19: written=8 skipped=2
-chunk 0-9: skipped=10 (error from previous attempt)
+<h3 id="3-temperature">3. Temperature</h3>
+<p>Gunakan low temperature (0.0-0.3) untuk normalisasi:</p>
+<pre><code class="language-python">response = await client.chat.completions.create(
+    model=&quot;gpt-4o&quot;,
+    messages=messages,
+    temperature=0.1,  # ← Low temp untuk konsistency
+    max_tokens=1000,
+)
 </code></pre>
-<h2 id="runnable-example">Runnable Example</h2>
-<p>See <code>examples/relational_writer_usage.py</code> for complete working examples (no API key required).
-Demonstrates:
-- Many-to-one relation (comment → parent post)
-- One-to-many relation (post → comments)
-- Self-referencing (nested comments)</p>
-<h2 id="see-also">See Also</h2>
+<h3 id="4-monitor-logging">4. Monitor Logging</h3>
+<p>Enable DEBUG logging untuk troubleshooting:</p>
+<pre><code class="language-python">import logging
+logging.getLogger(&quot;hiveframe.agent.writer&quot;).setLevel(logging.DEBUG)
+</code></pre>
+<h2 id="debugging">Debugging</h2>
+<h3 id="semua-rows-di-skip">Semua rows di-skip</h3>
+<p><strong>Penyebab</strong>: LLM tidak confident atau parsing error</p>
+<p><strong>Debug</strong>:</p>
+<pre><code class="language-python"># Set logging ke DEBUG
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+# Lihat di log:
+# _build_operations SKIP: cell_id=... confidence=0.45 (below threshold 0.60)
+# → Confidence terlalu rendah, naikkan instruction clarity
+# 
+# stream_normalize LLM_ERROR: ...
+# → LLM call error, check API key dan model availability
+</code></pre>
+<h3 id="rows-normalized-tapi-dengan-salah-value">Rows normalized tapi dengan salah value</h3>
+<p><strong>Penyebab</strong>: LLM hallucinating atau instruction tidak jelas</p>
+<p><strong>Fix</strong>:
+- Perbaiki instruction untuk lebih spesifik
+- Tambah examples dalam instruction
+- Turunkan chunk_size untuk lebih detail per batch
+- Raise confidence_threshold untuk lebih strict</p>
+<h3 id="timeout-atau-slow-processing">Timeout atau slow processing</h3>
+<p><strong>Penyebab</strong>: Chunk size terlalu besar atau LLM call slow</p>
+<p><strong>Fix</strong>:</p>
+<pre><code class="language-python"># Reduce chunk size
+result = await writer.stream_normalize(
+    column=&quot;city&quot;,
+    llm_call=llm_call,
+    chunk_size=20,  # ← Kurangi dari 50
+)
+
+# Atau increase LLM timeout
+# (tergantung LLM provider client)
+</code></pre>
+<h2 id="perbandingan-dengan-alternatives">Perbandingan dengan Alternatives</h2>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Pro</th>
+<th>Con</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>stream_normalize</strong></td>
+<td>Context-aware, debug logging, low hallucination</td>
+<td>Perlu async, API calls</td>
+</tr>
+<tr>
+<td><code>normalize()</code> single</td>
+<td>Simple, synchronous</td>
+<td>Per-row, tidak scalable</td>
+</tr>
+<tr>
+<td><code>batch_enrich()</code> manual</td>
+<td>Flexible</td>
+<td>Harus manage prompt sendiri</td>
+</tr>
+<tr>
+<td>SQL/pandas</td>
+<td>Fast, deterministic</td>
+<td>Tidak flexible untuk complex rules</td>
+</tr>
+</tbody>
+</table>
+<h2 id="limitations">Limitations</h2>
+<ol>
+<li><strong>Iterative refinement tidak supported</strong> — satu pass saja</li>
+<li>
+<p>Gunakan <code>MultiFrameAgent</code> mode="query" untuk iterative analysis</p>
+</li>
+<li>
+<p><strong>Cross-frame context limited</strong> — hanya satu frame</p>
+</li>
+<li>
+<p>Gunakan <code>RelationalAgentWriter</code> untuk multi-frame normalization</p>
+</li>
+<li>
+<p><strong>No automatic retry per row</strong> — fail chunk menaffect semua rows dalam chunk</p>
+</li>
+<li>Gunakan chunk_size kecil untuk isolation</li>
+</ol>
+<h2 id="changelog">Changelog</h2>
+<h3 id="v012-april-2026">v0.1.2 (April 2026)</h3>
 <ul>
-<li><a href="../columns-hint/">MultiFrameAgent</a> — Cross-frame analysis without writes</li>
-<li><a href="../../api/agent/">AgentWriter API</a> — Single-frame transactional writes</li>
-<li><a href="../../guides/iterative-agent/">Guides → Iterative Agent</a> — Iterative LLM workflows</li>
+<li>✨ Context-aware prompts dengan actual data + all columns</li>
+<li>✨ Enhanced debug logging di setiap step</li>
+<li>✨ Support custom_instruction untuk flexible normalization rules</li>
+<li>✨ Progress callback untuk monitoring</li>
+</ul>
+<h3 id="v011-sebelumnya">v0.1.1 (sebelumnya)</h3>
+<ul>
+<li>Generic prompt tanpa context</li>
+<li>Minimal logging</li>
 </ul>
 
 

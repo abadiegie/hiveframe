@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="agent/columns-hint/" class="md-tabs__link">
+        <a href="agent/stream-normalize/" class="md-tabs__link">
           
   
   
@@ -1065,6 +1065,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="agent/stream-normalize/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stream Normalize
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -2640,7 +2668,16 @@ for h in history:
     # Call your LLM here, return list of {cell_id, value, confidence}
     ...
 result = await writer.stream_normalize(&quot;city&quot;, llm_call, chunk_size=50)
+
+# Optional: provide task-specific instruction for better output quality
+result = await writer.stream_normalize(
+    &quot;city&quot;,
+    llm_call,
+    chunk_size=50,
+    custom_instruction=&quot;Normalize city values to official Indonesian province names.&quot;,
+)
 </code></pre>
+<p>See API details: <a href="api/agent/#agentwriter-custom-instruction">Agent API</a>.</p>
 <h3 id="metrics-endpoint">Metrics Endpoint</h3>
 <p>Expose DataFrame and cluster metrics for observability:</p>
 <pre><code class="language-python">metrics = df.get_metrics()
