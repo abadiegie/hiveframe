@@ -251,7 +251,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../agent/columns-hint/" class="md-tabs__link">
+        <a href="../../agent/stream-normalize/" class="md-tabs__link">
           
   
   
@@ -455,6 +455,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../agent/stream-normalize/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stream Normalize
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -861,6 +889,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="AgentWriter Key Methods">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stream-normalize" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stream Normalize
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1086,6 +1131,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="AgentWriter Key Methods">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stream-normalize" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stream Normalize
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1254,8 +1316,30 @@
 <ul>
 <li><code>normalize(cell_id, value, confidence)</code> — Write a single cell with confidence</li>
 <li><code>batch_enrich(operations)</code> — Write a batch of cell updates</li>
-<li><code>stream_normalize(column, llm_call, chunk_size=50)</code> — Normalize a column in streaming chunks</li>
+<li><code>stream_normalize(column, llm_call, chunk_size=50, progress_callback=None, custom_instruction=None)</code> — Normalize a column in streaming chunks with context-aware prompts</li>
 </ul>
+<h3 id="stream-normalize">Stream Normalize</h3>
+<p><code>stream_normalize()</code> uses context-aware prompts that include actual data + all columns to help LLM make better normalization decisions. Features:</p>
+<ul>
+<li><strong>Context-aware prompts</strong>: Actual DataFrame snapshot with all columns for context</li>
+<li><strong>Confidence scoring</strong>: Only writes values with confidence ≥ 0.60</li>
+<li><strong>Debug logging</strong>: Full audit trail at every step for troubleshooting</li>
+<li><strong>Custom instructions</strong>: Flexible normalization rules per use case</li>
+<li><strong>Progress tracking</strong>: Optional callback for monitoring</li>
+</ul>
+<p>Example with custom instruction:</p>
+<pre><code class="language-python">result = await writer.stream_normalize(
+    column=&quot;city&quot;,
+    llm_call=llm_call,
+    chunk_size=50,
+    custom_instruction=(
+        &quot;Normalize city values to official Indonesian province names. &quot;
+        &quot;Format: 'Province: City'. Examples: 'jkt' → 'DKI Jakarta: Jakarta Pusat'&quot;
+    ),
+)
+</code></pre>
+<p>For complete API reference, logging format, best practices, and debugging tips:
+<strong><a href="../../agent/stream-normalize/">Agent → Stream Normalize</a></strong></p>
 <h2 id="relationalagentwriter-key-methods">RelationalAgentWriter Key Methods</h2>
 <ul>
 <li><code>stream_normalize_relational(target_column, instruction, chunk_size=10, provider, ...)</code> — Normalize a column using cross-frame relations</li>
