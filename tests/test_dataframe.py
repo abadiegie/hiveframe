@@ -104,7 +104,7 @@ def test_read_global_raises_when_event_loop_running() -> None:
     df = DFrame({"city": ["jakarta"]})
 
     async def _call_inside_loop() -> None:
-        with pytest.raises(RuntimeError, match="read_global\\(\\) cannot be called while an event loop is running"):
+        with pytest.raises(RuntimeError, match="read_fresh_global\\(\\) cannot be called while an event loop is running"):
             _ = df.read_global()
 
     asyncio.run(_call_inside_loop())
@@ -130,6 +130,32 @@ def test_read_global_lazy_chunking() -> None:
     # Check content
     assert chunks[0].iloc[0]["city"] == "city_0"
     assert chunks[-1].iloc[-1]["score"] == 104
+
+
+def test_read_global_lazy_async_chunking() -> None:
+    df = DFrame({"city": [f"city_{i}" for i in range(23)], "score": list(range(23))})
+
+    async def _collect() -> list[pd.DataFrame]:
+        chunks: list[pd.DataFrame] = []
+        async for chunk in df.read_fresh_global_lazy_async(chunk_size=10):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert len(chunks) == 3
+    assert chunks[0].shape == (10, 2)
+    assert chunks[-1].shape == (3, 2)
+    assert chunks[-1].iloc[-1]["city"] == "city_22"
+
+
+def test_read_global_lazy_raises_with_async_guidance() -> None:
+    df = DFrame({"city": ["jakarta"]})
+
+    async def _call_inside_loop() -> None:
+        with pytest.raises(RuntimeError, match="read_fresh_global_lazy_async"):
+            _ = list(df.read_fresh_global_lazy(chunk_size=1))
+
+    asyncio.run(_call_inside_loop())
 
 
 def test_schema_validation_runs_during_seed() -> None:

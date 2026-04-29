@@ -140,3 +140,57 @@ def test_stream_normalize_logs_llm_debug(monkeypatch, caplog):
     assert "stream_normalize LLM_RESPONSE" in caplog.text
     assert "Jakarta" in caplog.text
 
+
+def test_normalize_low_confidence_is_skipped() -> None:
+    df = DFrame({"city": ["jakarta"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    result = asyncio.run(
+        writer.normalize(
+            f"{df._frame_id}::city_0",
+            "DKI Jakarta",
+            confidence=0.30,
+        )
+    )
+
+    assert result["written"] == 0
+    assert result["skipped"] == 1
+    assert df.read_fresh().at[0, "city"] == "jakarta"
+
+
+def test_batch_enrich_mixed_confidence_writes_only_above_threshold() -> None:
+    df = DFrame({"city": ["jakarta", "bandung"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    result = asyncio.run(
+        writer.batch_enrich([
+            {
+                "cell_id": f"{df._frame_id}::city_0",
+                "value": "DKI Jakarta",
+                "confidence": 0.90,
+            },
+            {
+                "cell_id": f"{df._frame_id}::city_1",
+                "value": "Jawa Barat",
+                "confidence": 0.10,
+            },
+        ])
+    )
+
+    fresh = df.read_fresh()
+    assert result["written"] == 1
+    assert result["skipped"] == 1
+    assert fresh.at[0, "city"] == "DKI Jakarta"
+    assert fresh.at[1, "city"] == "bandung"
+
+
