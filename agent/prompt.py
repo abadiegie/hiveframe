@@ -231,6 +231,27 @@ REVIEW_FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
 ]
 
 
+_KNOWN_EXAMPLE_FRAMES = {"sales", "inventory", "sales_q1", "sales_q2"}
+
+
+def _filter_example_dialogues(
+    examples: list[dict[str, str]],
+    available_frames: list[str],
+) -> list[dict[str, str]]:
+    """Return only example dialogues whose frame references fit the current session."""
+    available = set(available_frames)
+    filtered: list[dict[str, str]] = []
+    for idx in range(0, len(examples), 2):
+        dialogue = examples[idx:idx + 2]
+        if not dialogue:
+            continue
+        text = "\n".join(message.get("content", "") for message in dialogue)
+        mentioned = {frame for frame in _KNOWN_EXAMPLE_FRAMES if frame in text}
+        if not mentioned or mentioned.issubset(available):
+            filtered.extend(dialogue)
+    return filtered
+
+
 _REVIEW_SYSTEM_PROMPT = (
     "You are evaluating query results to determine if they are "
     "sufficient to answer the original instruction.\n\n"
@@ -345,14 +366,10 @@ def build_multi_frame_messages(
         messages.append({"role": "system", "content": "\n\n---\n\n".join(context_parts)})
 
     if include_few_shot:
-        # Only include few-shot examples whose frame references match
-        # the actual available frames — avoids confusing the LLM with
-        # frames that don't exist in the current session.
-        fake_frames = {"sales_q1", "sales_q2", "sales", "inventory"}
-        relevant_examples = [
-            ex for ex in MULTI_FRAME_FEW_SHOT_EXAMPLES
-            if not any(f in str(ex) for f in fake_frames - set(available_frames))
-        ]
+        relevant_examples = _filter_example_dialogues(
+            MULTI_FRAME_FEW_SHOT_EXAMPLES,
+            available_frames,
+        )
         if relevant_examples:
             messages.extend(relevant_examples)
         else:
@@ -443,15 +460,14 @@ def build_query_generation_messages(
             ),
         })
 
-    # Only include few-shot examples if they match available frames
-    # to avoid confusing the LLM with unrelated frame names
     if available_frames:
-        relevant_examples = [ex for ex in QUERY_GEN_FEW_SHOT_EXAMPLES 
-                            if not any(f in str(ex) for f in ["sales", "inventory", "sales_q1", "sales_q2"])]
+        relevant_examples = _filter_example_dialogues(
+            QUERY_GEN_FEW_SHOT_EXAMPLES,
+            available_frames,
+        )
         if relevant_examples:
             messages.extend(relevant_examples)
         else:
-            # If no relevant examples, skip few-shot entirely rather than show mismatched frames
             logger.debug(
                 "build_query_generation_messages: skipping few-shot examples (frame mismatch). "
                 "Available: %s", available_frames
@@ -636,10 +652,12 @@ def build_review_messages(
     queries_executed: dict[str, str],
     query_results: dict[str, str],
     query_errors: dict[str, str],
+    frame_schemas: dict[str, str] | None = None,
     iteration: int = 0,
     previous_verdicts: list[dict[str, str]] | None = None,
+    include_few_shot: bool = True,
 ) -> list[dict[str, str]]:
-    """Build messages untuk Review phase."""
+    """Build messages for the review phase."""
     messages: list[dict[str, str]] = [{"role": "system", "content": _REVIEW_SYSTEM_PROMPT}]
 
     parts = [
@@ -654,6 +672,12 @@ def build_review_messages(
                 f"  Attempt {idx}: {verdict.get('status', '?')} - {verdict.get('reason', '')}"
             )
         parts.append("\n## Previous attempts\n" + "\n".join(history_lines))
+
+    if frame_schemas:
+        schema_parts = []
+        for label, schema in frame_schemas.items():
+            schema_parts.append(f"## Frame schema: `{label}`\n\n{schema}")
+        parts.append("\n## Available schemas\n\n" + "\n\n---\n\n".join(schema_parts))
 
     if queries_executed:
         parts.append("\n## Queries executed")
@@ -675,7 +699,26 @@ def build_review_messages(
             parts.append(f"- `{label}`: {error}")
 
     messages.append({"role": "system", "content": "\n\n".join(parts)})
-    messages.extend(REVIEW_FEW_SHOT_EXAMPLES)
+
+    if include_few_shot:
+        available_frames = sorted(
+            set(frame_schemas or {})
+            | set(queries_executed)
+            | set(query_results)
+            | set(query_errors)
+        )
+        relevant_examples = _filter_example_dialogues(
+            REVIEW_FEW_SHOT_EXAMPLES,
+            available_frames,
+        )
+        if relevant_examples:
+            messages.extend(relevant_examples)
+        else:
+            logger.debug(
+                "build_review_messages: skipping few-shot examples (frame mismatch). Available: %s",
+                available_frames,
+            )
+
     messages.append({
         "role": "user",
         "content": (

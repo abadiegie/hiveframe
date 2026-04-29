@@ -1,7 +1,7 @@
 # Copyright 2026 Abadi Gilang
 # SPDX-License-Identifier: Apache-2.0
 
-"""Result dataclasses untuk MultiFrameAgent."""
+"""Result dataclasses for MultiFrameAgent."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class SeriesSpec:
 
 @dataclass
 class FrameInsight:
-    """Satu insight dari analisis cross-frame."""
+    """One insight produced by cross-frame analysis."""
 
     finding: str
     frames: list[str]
@@ -98,7 +98,7 @@ class FrameInsight:
 
 @dataclass
 class ReviewVerdict:
-    """Verdict dari LLM setelah review query results."""
+    """Verdict returned by the LLM after reviewing query results."""
 
     status: str
     reason: str = ""
@@ -112,7 +112,7 @@ class ReviewVerdict:
 
 @dataclass
 class MultiFrameResult:
-    """Result dari MultiFrameAgent.analyze()."""
+    """Result returned by ``MultiFrameAgent.analyze()``."""
 
     action: str = ""
     reasoning: str = ""
@@ -128,6 +128,8 @@ class MultiFrameResult:
     converged: bool = False
     final_verdict: str = ""
     series: list[SeriesSpec] = field(default_factory=list)
+    fallback_reason: str = ""
+    attempt_summaries: list[dict[str, Any]] = field(default_factory=list)
 
     def get_series(self, name: str) -> SeriesSpec | None:
         """Get a SeriesSpec by label/name."""
@@ -137,9 +139,9 @@ class MultiFrameResult:
         return None
 
     def to_dataframe(self, name: str) -> "pd.DataFrame":
-        """Get data dari series tertentu sebagai pandas DataFrame.
+        """Return one series as a pandas DataFrame.
 
-        Returns empty DataFrame kalau name tidak ditemukan.
+        Returns an empty DataFrame when the requested series is not found.
         """
         spec = self.get_series(name)
         if spec is None:
@@ -148,7 +150,7 @@ class MultiFrameResult:
         return spec.to_dataframe()
 
     def to_markdown(self) -> str:
-        """Format hasil sebagai markdown report."""
+        """Render the result as a markdown report."""
 
         parts: list[str] = []
 
@@ -188,6 +190,29 @@ class MultiFrameResult:
                 icon = icons.get(verdict.status, "?")
                 parts.append(f"{idx}. {icon} **{verdict.status}** - {verdict.reason}")
 
+        if self.attempt_summaries:
+            parts.append("\n## Attempt Summaries\n")
+            for summary in self.attempt_summaries:
+                attempt = summary.get("attempt", "?")
+                source = summary.get("source", "generated")
+                succeeded = ", ".join(summary.get("succeeded_labels", [])) or "-"
+                failed = ", ".join(summary.get("failed_labels", [])) or "-"
+                verdict = summary.get("verdict") or "-"
+                line = (
+                    f"- Attempt {attempt} [{source}] | succeeded: {succeeded} | "
+                    f"failed: {failed} | verdict: {verdict}"
+                )
+                reason = summary.get("reason")
+                if reason:
+                    line += f" | reason: {reason}"
+                rewrites = summary.get("rewrites")
+                if rewrites:
+                    line += f" | rewrites: {rewrites}"
+                suggested = ", ".join(summary.get("suggested_query_labels", []))
+                if suggested:
+                    line += f" | suggested: {suggested}"
+                parts.append(line)
+
         if self.total_llm_calls:
             converged_str = "yes" if self.converged else "no"
             parts.append(
@@ -195,6 +220,9 @@ class MultiFrameResult:
                 f"Converged: {converged_str} | "
                 f"Final verdict: {self.final_verdict or '?'}_"
             )
+
+        if self.fallback_reason:
+            parts.append(f"\n_Fallback reason: {self.fallback_reason}_")
 
         if self.queries_executed:
             parts.append("\n## Queries Executed\n")
@@ -217,7 +245,7 @@ class MultiFrameResult:
         return "\n".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize ke dict untuk JSON response."""
+        """Serialize the result into a JSON-friendly dictionary."""
 
         base: dict[str, Any] = {
             "action": self.action,
@@ -253,6 +281,8 @@ class MultiFrameResult:
             "total_llm_calls": self.total_llm_calls,
             "converged": self.converged,
             "final_verdict": self.final_verdict,
+            "fallback_reason": self.fallback_reason,
+            "attempt_summaries": self.attempt_summaries,
         }
 
         if self.series:
