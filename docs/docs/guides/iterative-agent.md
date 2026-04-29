@@ -2,13 +2,12 @@
 
 ## Overview
 
-By default (`max_retries=0`), `MultiFrameAgent` runs a single **query → execute → analyze**
-pass. Activating `max_retries > 0` enables the **iterative review/retry loop** — the agent
-reviews its own query results, decides if they are sufficient, and retries with corrections
-until it converges or reaches the retry limit.
+`MultiFrameAgent` query mode always runs a reviewed **query → execute → review → final analysis**
+flow. Increasing `max_retries` allows additional correction rounds after the first reviewed
+attempt when the verdict is not yet sufficient.
 
 ```
-max_retries=0  →  query → execute → analyze
+max_retries=0  →  query → execute → review → final analyze
 max_retries=N  →  (query → execute → review → [retry if needed]) × N+1 → final analyze
 ```
 
@@ -84,6 +83,8 @@ result.review_history    # list[ReviewVerdict] — one per attempt
 result.total_llm_calls   # int — total LLM calls (query + review + final)
 result.converged         # bool — True if last verdict was accepted or merge
 result.final_verdict     # str — last verdict status
+result.fallback_reason   # str — why it fell back to sample mode, if it did
+result.attempt_summaries # list[dict] — source, labels, verdict, rewrites per attempt
 ```
 
 ### LLM call count formula
@@ -132,10 +133,15 @@ async def main() -> None:
     print(f"LLM calls: {result.total_llm_calls}")
     print(f"Converged: {result.converged}")
     print(f"Final verdict: {result.final_verdict}")
+    print(f"Fallback reason: {result.fallback_reason or '-'}")
 
     # Per-attempt review history
     for i, verdict in enumerate(result.review_history, 1):
         print(f"Attempt {i}: {verdict.status} — {verdict.reason}")
+
+    # Per-attempt execution telemetry
+    for summary in result.attempt_summaries:
+        print(summary)
 
     # Full markdown report (includes iteration history + chart series)
     print(result.to_markdown())
@@ -164,6 +170,10 @@ Produk A memiliki penjualan tertinggi (500 unit) dengan stok tersisa hanya 5 uni
 ## Iteration History
 1. ~ **partial** - Sales data OK, inventory query used wrong column name
 2. ✓ **accepted** - Both datasets available and sufficient
+
+## Attempt Summaries
+- Attempt 1 [generated] | succeeded: sales | failed: inventory | verdict: partial | suggested: inventory
+- Attempt 2 [review_override] | succeeded: inventory | failed: - | verdict: accepted | reason: Both datasets available and sufficient
 ```
 
 ---
@@ -179,20 +189,21 @@ result = await agent.analyze(
     max_retries=2,
 )
 
-# Access chart data
+# Access chart-ready data
 df = result.to_dataframe("sales_vs_stock")
-fig = result.to_plotly_figure("sales_vs_stock", chart_type="bar")
-fig.show()
+print(df)
 ```
 
-See [API Reference → AgentWriter](../api/agent.md#seriesspec) for full SeriesSpec docs.
+See [API Reference → AgentWriter](../api/agent.md#seriesspec) for full `SeriesSpec` docs.
+
+Hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.
 
 ---
 
 ## Tips
 
-- Start with `max_retries=1` — covers most real-world cases with one retry
-- Use `max_retries=0` (default) for simple single-frame queries where one pass is enough
+- Start with `max_retries=0` for the lowest-cost reviewed pass
+- Increase to `max_retries=1` when you want one extra correction round
 - `result.total_llm_calls` is your cost indicator — monitor it per query type
 - `result.converged=False` with `final_verdict="unknown"` means max retries hit without convergence — consider increasing `max_retries` or simplifying the instruction
 - The agent accumulates results across attempts (`partial` mode) — earlier successful results are not re-queried

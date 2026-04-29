@@ -10,6 +10,14 @@ hiveframe can run on minimal hardware and is ideal for homelab or single-board c
 - Use `transport_backend="tcp"` for local network communication
 - Point every node at the same `db_path` when they should share one registry state
 
+## SQLite Concurrency Note
+
+SQLite is great for single-machine and homelab clusters, but it is not a high-concurrency distributed registry.
+
+- Use `registry_backend="sqlite"` for development, demos, and low-write-control-plane workloads.
+- For heavier concurrent node join/fail traffic across multiple machines, prefer `registry_backend="nats"`.
+- If you keep SQLite, use one shared stable path and avoid aggressive simultaneous process churn.
+
 ## Example
 
 ```python
