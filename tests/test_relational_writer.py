@@ -467,6 +467,29 @@ def test_stream_normalize_llm_error_continues(monkeypatch: pytest.MonkeyPatch) -
     assert result["skipped"] > 0
 
 
+def test_stream_normalize_llm_timeout_skips_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _writer_many_to_one()
+
+    async def slow_llm(_messages):
+        await asyncio.sleep(0.05)
+        return json.dumps({"action": "batch_enrich", "operations": []})
+
+    monkeypatch.setattr(writer, "_make_llm_caller", lambda *args, **kwargs: slow_llm)
+
+    result = asyncio.run(
+        writer.stream_normalize_relational(
+            target_column="stance",
+            instruction="classify",
+            chunk_size=2,
+            provider="anthropic",
+            llm_timeout_seconds=0.01,
+        )
+    )
+
+    assert result["written"] == 0
+    assert result["skipped"] == result["total"]
+
+
 def test_stream_normalize_missing_target_column_created(monkeypatch: pytest.MonkeyPatch) -> None:
     comments = DFrame(
         {

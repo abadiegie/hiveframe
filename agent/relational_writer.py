@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -50,6 +51,7 @@ class RelationalAgentWriter:
         agent_id: str = "relational_agent",
         confidence_threshold: float = 0.6,
         author_type: str = "llm_normalization",
+        llm_timeout_seconds: float | None = 45.0,
     ) -> None:
         self._target = target_frame
         self._context_frames = context_frames or {}
@@ -57,6 +59,7 @@ class RelationalAgentWriter:
         self._agent_id = agent_id
         self._confidence_threshold = confidence_threshold
         self._author_type = author_type
+        self._llm_timeout_seconds = llm_timeout_seconds
 
         self._cache: dict[str, dict[Any, list[dict[str, Any]]]] = {}
         self._cache_built = False
@@ -100,9 +103,9 @@ class RelationalAgentWriter:
                 continue
 
             index: dict[Any, list[dict[str, Any]]] = {}
-            for _, row in df.iterrows():
-                key = row[rel.to_column]
-                index.setdefault(key, []).append(row.to_dict())
+            grouped = df.groupby(rel.to_column, dropna=False, sort=False)
+            for key, group in grouped:
+                index[key] = group.to_dict(orient="records")
 
             self._cache[cache_key] = index
             logger.info(
@@ -310,6 +313,7 @@ class RelationalAgentWriter:
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        llm_timeout_seconds: float | None = None,
     ) -> dict[str, int]:
         """Normalize target_column using cross-frame context per chunk."""
         from .prompt import parse_plan
@@ -355,7 +359,11 @@ class RelationalAgentWriter:
             )
 
             try:
-                raw = await llm_call(messages)
+                timeout = self._llm_timeout_seconds if llm_timeout_seconds is None else llm_timeout_seconds
+                if timeout is None:
+                    raw = await llm_call(messages)
+                else:
+                    raw = await asyncio.wait_for(llm_call(messages), timeout=timeout)
                 plan = parse_plan(raw)
                 operations = list(plan.get("operations", []))
                 logger.debug(

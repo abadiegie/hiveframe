@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import re
 import time
@@ -214,6 +216,7 @@ class QueryExecutor:
         call_llm,
         build_schema,
         safe_eval,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
         max_retries: int = 3,
         max_result_rows: int = 200,
     ) -> None:
@@ -221,13 +224,19 @@ class QueryExecutor:
         self.call_llm = call_llm
         self.build_schema = build_schema
         self.safe_eval = safe_eval
+        self._fresh_frames = fresh_frames or {}
         self.max_retries = max_retries
         self.max_result_rows = max_result_rows
 
     async def run(
         self,
         instruction: str,
-    ) -> tuple[dict[str, "pd.DataFrame"], dict[str, str]]:
+    ) -> tuple[
+        dict[str, "pd.DataFrame"],
+        dict[str, str],
+        dict[str, str],
+        list[dict[str, Any]],
+    ]:
         """Run code generation and self-healing execution."""
         import traceback
 
@@ -237,6 +246,8 @@ class QueryExecutor:
         attempt_history: list[dict[str, str]] = []
         results: dict[str, "pd.DataFrame"] = {}
         errors: dict[str, str] = {}
+        executed_queries: dict[str, str] = {}
+        attempt_summaries: list[dict[str, Any]] = []
         pending: set[str] = set(self.frames.keys())
 
         for attempt in range(self.max_retries):
@@ -253,6 +264,9 @@ class QueryExecutor:
 
             newly_failed: list[dict[str, str]] = []
             seen_known_labels: set[str] = set()
+            rewritten_labels: dict[str, list[str]] = {}
+            succeeded_labels: list[str] = []
+            failed_labels: list[str] = []
 
             for label, code in code_blocks.items():
                 label = str(label).strip()
@@ -279,7 +293,9 @@ class QueryExecutor:
 
                 seen_known_labels.add(label)
                 try:
-                    fresh = frame.read_fresh()
+                    fresh = self._fresh_frames.get(label)
+                    if fresh is None:
+                        fresh = frame.read_fresh()
                     rewritten_code, applied_rewrites = _rewrite_generated_code(
                         code=code,
                         frame_label=label,
@@ -287,6 +303,7 @@ class QueryExecutor:
                         known_labels=set(self.frames.keys()),
                     )
                     if applied_rewrites:
+                        rewritten_labels[label] = list(applied_rewrites)
                         before_preview = truncate_text(" ".join(code.split()), 180)
                         after_preview = truncate_text(" ".join(rewritten_code.split()), 180)
                         logger.info(
@@ -305,8 +322,10 @@ class QueryExecutor:
                         )
                     result_df = self.safe_eval(rewritten_code, fresh)
                     results[label] = result_df.head(self.max_result_rows)
+                    executed_queries[label] = rewritten_code
                     errors.pop(label, None)
                     pending.discard(label)
+                    succeeded_labels.append(label)
                     logger.info(
                         "QueryExecutor OK: attempt=%d label=%s rows=%d",
                         attempt + 1,
@@ -338,6 +357,7 @@ class QueryExecutor:
                         label,
                         full_tb,
                     )
+                    failed_labels.append(label)
 
             for label in sorted(pending - seen_known_labels):
                 error = (
@@ -352,8 +372,20 @@ class QueryExecutor:
                     label,
                     error,
                 )
+                failed_labels.append(label)
 
             attempt_history.extend(newly_failed)
+            attempt_summaries.append(
+                {
+                    "attempt": attempt + 1,
+                    "source": "query_executor",
+                    "generated_labels": sorted(code_blocks.keys()),
+                    "succeeded_labels": sorted(succeeded_labels),
+                    "failed_labels": sorted(set(failed_labels)),
+                    "rewrites": rewritten_labels,
+                    "pending_after": sorted(pending),
+                }
+            )
 
             if not seen_known_labels:
                 break
@@ -366,7 +398,7 @@ class QueryExecutor:
                     list(pending),
                 )
 
-        return results, errors
+        return results, errors, executed_queries, attempt_summaries
 
 
 class MultiFrameAgent:
@@ -380,6 +412,7 @@ class MultiFrameAgent:
         model: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
+        llm_timeout_seconds: float | None = 45.0,
     ) -> None:
         if not frames:
             raise ValueError("frames dict cannot be empty")
@@ -389,6 +422,7 @@ class MultiFrameAgent:
         self._model = model
         self._anthropic_api_key = anthropic_api_key
         self._openai_api_key = openai_api_key
+        self._llm_timeout_seconds = llm_timeout_seconds
         self._columns_hint: dict[str, list[str]] | None = None
 
         logger.info(
@@ -423,20 +457,30 @@ class MultiFrameAgent:
         if mode not in ("sample", "query"):
             raise ValueError("mode must be 'sample' or 'query'")
 
-        # Reset per call to avoid state leaks across analyze() invocations.
-        self._columns_hint = columns_hint
+        normalized_hint = self._normalize_columns_hint(columns_hint)
+        fresh_frames = self._snapshot_fresh_frames()
 
-        if mode == "query":
-            if max_retries > 0:
+        # Kept for backwards compatibility in tests/introspection only.
+        self._columns_hint = normalized_hint
+
+        try:
+            if mode == "query":
                 result = await self._analyze_query_mode_iterative(
                     instruction,
                     max_result_rows,
-                    max_retries,
+                    max(0, max_retries),
+                    columns_hint=normalized_hint,
+                    fresh_frames=fresh_frames,
                 )
             else:
-                result = await self._analyze_query_mode_simple(instruction, max_result_rows)
-        else:
-            result = await self._analyze_sample_mode(instruction, max_sample_rows)
+                result = await self._analyze_sample_mode(
+                    instruction,
+                    max_sample_rows,
+                    columns_hint=normalized_hint,
+                    fresh_frames=fresh_frames,
+                )
+        finally:
+            self._columns_hint = None
 
         result.mode = mode
 
@@ -445,12 +489,19 @@ class MultiFrameAgent:
 
         return result
 
-    async def _analyze_sample_mode(self, instruction: str, max_rows: int) -> MultiFrameResult:
+    async def _analyze_sample_mode(
+        self,
+        instruction: str,
+        max_rows: int,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
+    ) -> MultiFrameResult:
         from .prompt import build_multi_frame_messages
 
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
-            hint_cols = self._columns_hint.get(label) if self._columns_hint is not None else None
+            hint_cols = columns_hint.get(label) if columns_hint is not None else None
+            cached_fresh = fresh_frames.get(label) if fresh_frames is not None else None
 
             if hint_cols is not None:
                 contexts[label] = self._build_context_with_hint(
@@ -458,6 +509,7 @@ class MultiFrameAgent:
                     frame=frame,
                     columns=hint_cols,
                     max_rows=max_rows,
+                    fresh=cached_fresh,
                 )
                 logger.info("Using columns_hint for frame '%s': %s", label, hint_cols)
             else:
@@ -476,30 +528,60 @@ class MultiFrameAgent:
         plan = parse_plan(raw)
         return self._plan_to_result(plan)
 
-    async def _analyze_query_mode(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
+    async def _analyze_query_mode(
+        self,
+        instruction: str,
+        max_result_rows: int,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
+    ) -> MultiFrameResult:
         """Backward-compatible alias for direct callers."""
-        return await self._analyze_query_mode_simple(instruction, max_result_rows)
+        return await self._analyze_query_mode_simple(
+            instruction,
+            max_result_rows,
+            columns_hint=columns_hint,
+            fresh_frames=fresh_frames,
+        )
 
-    async def _analyze_query_mode_simple(self, instruction: str, max_result_rows: int) -> MultiFrameResult:
+    async def _analyze_query_mode_simple(
+        self,
+        instruction: str,
+        max_result_rows: int,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
+    ) -> MultiFrameResult:
         from .prompt import build_analysis_messages
 
         executor = QueryExecutor(
             frames=self._frames,
             call_llm=self._call_llm,
-            build_schema=lambda: self._build_schema_context_with_samples(use_hint=False),
+            build_schema=lambda: self._build_schema_context_with_samples(
+                use_hint=False,
+                columns_hint=columns_hint,
+                fresh_frames=fresh_frames,
+            ),
             safe_eval=self._safe_eval,
+            fresh_frames=fresh_frames,
             max_retries=QueryExecutor.MAX_RETRIES,
             max_result_rows=max_result_rows,
         )
-        query_results, query_errors = await executor.run(instruction)
+        query_results, query_errors, executed_queries, attempt_summaries = await executor.run(instruction)
 
         if not query_results:
             logger.info(
                 "_analyze_query_mode_simple NO_RESULTS after %d attempts, falling back to sample mode",
                 QueryExecutor.MAX_RETRIES,
             )
-            fallback_result = await self._analyze_sample_mode(instruction, 50)
+            fallback_result = await self._call_sample_mode_compat(
+                instruction=instruction,
+                max_rows=50,
+                columns_hint=columns_hint,
+                fresh_frames=fresh_frames,
+            )
             fallback_result.query_errors = query_errors
+            fallback_result.queries_executed = executed_queries
+            fallback_result.attempt_summaries = attempt_summaries
+            fallback_result.fallback_reason = "query_executor_no_results"
             return fallback_result
 
         result_contexts = {
@@ -511,14 +593,16 @@ class MultiFrameAgent:
             instruction=instruction,
             query_results=result_contexts,
             query_errors=query_errors,
-            original_queries={},
+            original_queries=executed_queries,
         )
 
         raw_analysis = await self._call_llm(analysis_messages)
         analysis_plan = parse_plan(raw_analysis)
 
         result = self._plan_to_result(analysis_plan)
+        result.queries_executed = executed_queries
         result.query_errors = query_errors
+        result.attempt_summaries = attempt_summaries
         return result
 
     async def _analyze_query_mode_iterative(
@@ -526,6 +610,8 @@ class MultiFrameAgent:
         instruction: str,
         max_result_rows: int,
         max_retries: int,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
     ) -> MultiFrameResult:
         """Iterative query mode with review+retry loop."""
         from .prompt import (
@@ -534,7 +620,11 @@ class MultiFrameAgent:
             build_review_messages,
         )
 
-        schema_contexts = self._build_schema_context(use_hint=False)
+        schema_contexts = self._build_schema_context_with_samples(
+            use_hint=False,
+            columns_hint=columns_hint,
+            fresh_frames=fresh_frames,
+        )
 
         accumulated_results: dict[str, str] = {}
         accumulated_queries: dict[str, str] = {}
@@ -543,6 +633,8 @@ class MultiFrameAgent:
         total_llm_calls = 0
         reflection = ""
         extra_schema: dict[str, str] = {}
+        pending_queries_override: dict[str, str] | None = None
+        attempt_summaries: list[dict[str, Any]] = []
         started_at = time.perf_counter()
         skip_labels: set[str] = set()
         only_labels: set[str] | None = None
@@ -556,17 +648,29 @@ class MultiFrameAgent:
             )
 
             current_schema = {**schema_contexts, **extra_schema}
-            query_messages = build_query_generation_messages(
-                instruction=instruction,
-                frame_schemas=current_schema,
-                reflection=reflection,
-                iteration=attempt,
-            )
-            raw_queries = await self._call_llm(query_messages)
-            total_llm_calls += 1
+            if pending_queries_override:
+                new_queries = dict(pending_queries_override)
+                attempt_source = "review_override"
+                logger.info(
+                    "MultiFrameAgent attempt %d/%d using reviewer suggested queries: %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    list(new_queries.keys()),
+                )
+                pending_queries_override = None
+            else:
+                attempt_source = "generated"
+                query_messages = build_query_generation_messages(
+                    instruction=instruction,
+                    frame_schemas=current_schema,
+                    reflection=reflection,
+                    iteration=attempt,
+                )
+                raw_queries = await self._call_llm(query_messages)
+                total_llm_calls += 1
 
-            query_plan = parse_plan(raw_queries)
-            new_queries = query_plan.get("queries", {})
+                query_plan = parse_plan(raw_queries)
+                new_queries = query_plan.get("queries", {})
 
             if isinstance(new_queries, dict):
                 new_queries = {k: str(v) for k, v in new_queries.items()}
@@ -576,33 +680,70 @@ class MultiFrameAgent:
                     new_queries = {k: v for k, v in new_queries.items() if k not in skip_labels}
 
             if not isinstance(new_queries, dict) or not new_queries:
+                attempt_summaries.append(
+                    {
+                        "attempt": attempt + 1,
+                        "source": attempt_source,
+                        "generated_labels": [],
+                        "executed_labels": [],
+                        "succeeded_labels": [],
+                        "failed_labels": [],
+                        "verdict": "fallback",
+                        "reason": "no_queries_generated",
+                    }
+                )
                 logger.warning(
                     "No queries generated at attempt %d, falling back to sample mode",
                     attempt + 1,
                 )
-                result = await self._analyze_sample_mode(instruction, 50)
+                result = await self._call_sample_mode_compat(
+                    instruction=instruction,
+                    max_rows=50,
+                    columns_hint=columns_hint,
+                    fresh_frames=fresh_frames,
+                )
                 result.total_llm_calls = total_llm_calls + 1
                 result.converged = False
                 result.final_verdict = "fallback"
+                result.fallback_reason = "iterative_no_queries"
+                result.attempt_summaries = attempt_summaries
                 return result
 
             new_results: dict[str, str] = {}
             new_errors: dict[str, str] = {}
+            executed_this_attempt: dict[str, str] = {}
             for label, query_str in new_queries.items():
                 frame = self._frames.get(label)
                 if frame is None:
                     new_errors[label] = f"Frame '{label}' not found"
                     continue
                 try:
-                    fresh = frame.read_fresh()
-                    result_df = self._safe_eval(str(query_str), fresh)
+                    fresh = fresh_frames.get(label) if fresh_frames is not None else None
+                    if fresh is None:
+                        fresh = frame.read_fresh()
+                    executed_query, applied_rewrites = _rewrite_generated_code(
+                        code=str(query_str),
+                        frame_label=label,
+                        columns=[str(column) for column in fresh.columns],
+                        known_labels=set(self._frames.keys()),
+                    )
+                    if applied_rewrites:
+                        logger.info(
+                            "Iterative query rewrite: attempt=%d frame=%s rewrites=%s",
+                            attempt + 1,
+                            label,
+                            applied_rewrites,
+                        )
+                    result_df = self._safe_eval(executed_query, fresh)
                     new_results[label] = result_df.head(max_result_rows).to_string()
+                    executed_this_attempt[label] = executed_query
                     logger.info("Query OK: frame=%s rows=%d", label, len(result_df.head(max_result_rows)))
                 except Exception as exc:
                     new_errors[label] = str(exc)
+                    executed_this_attempt[label] = str(query_str)
                     logger.warning("Query failed: frame=%s error=%s", label, exc)
 
-            accumulated_queries.update({k: str(v) for k, v in new_queries.items()})
+            accumulated_queries.update(executed_this_attempt)
             accumulated_results.update(new_results)
             accumulated_errors.update(new_errors)
 
@@ -613,7 +754,11 @@ class MultiFrameAgent:
                 if "KeyError" in err or (err.startswith("'") and err.endswith("'"))
             }
             if column_key_errors and not reflection:
-                schema_ctx = self._build_schema_context(use_hint=False)
+                schema_ctx = self._build_schema_context(
+                    use_hint=False,
+                    columns_hint=columns_hint,
+                    fresh_frames=fresh_frames,
+                )
                 col_hints: list[str] = []
                 for lbl, schema_str in schema_ctx.items():
                     for line in schema_str.splitlines():
@@ -636,6 +781,7 @@ class MultiFrameAgent:
                 queries_executed=accumulated_queries,
                 query_results=accumulated_results,
                 query_errors=accumulated_errors,
+                frame_schemas=current_schema,
                 iteration=attempt,
                 previous_verdicts=[{"status": v.status, "reason": v.reason} for v in review_history],
             )
@@ -654,6 +800,7 @@ class MultiFrameAgent:
                 legacy_result.total_llm_calls = total_llm_calls
                 legacy_result.converged = True
                 legacy_result.final_verdict = "accepted"
+                legacy_result.attempt_summaries = attempt_summaries
                 return legacy_result
 
             verdict = ReviewVerdict(
@@ -667,6 +814,21 @@ class MultiFrameAgent:
                 merge_ready=bool(verdict_dict.get("merge_ready", False)),
             )
             review_history.append(verdict)
+            attempt_summaries.append(
+                {
+                    "attempt": attempt + 1,
+                    "source": attempt_source,
+                    "generated_labels": sorted(new_queries.keys()),
+                    "executed_labels": sorted(executed_this_attempt.keys()),
+                    "succeeded_labels": sorted(new_results.keys()),
+                    "failed_labels": sorted(new_errors.keys()),
+                    "verdict": verdict.status,
+                    "reason": verdict.reason,
+                    "accepted_labels": sorted(verdict.accepted_labels),
+                    "suggested_query_labels": sorted(verdict.suggested_queries.keys()),
+                    "needs_columns": sorted(verdict.needs_columns),
+                }
+            )
 
             if verdict.status == "accepted":
                 break
@@ -677,25 +839,42 @@ class MultiFrameAgent:
                 break
 
             if verdict.status == "partial":
+                override_queries = {
+                    label: str(query)
+                    for label, query in verdict.suggested_queries.items()
+                    if label in self._frames and label not in verdict.accepted_labels
+                }
+                for label in override_queries:
+                    accumulated_errors.pop(label, None)
+                    accumulated_results.pop(label, None)
+                pending_queries_override = override_queries or None
                 reflection = verdict.reflection
                 skip_labels = set(verdict.accepted_labels)
-                only_labels = set(verdict.suggested_queries.keys()) if verdict.suggested_queries else None
+                only_labels = set(override_queries) if override_queries else None
             elif verdict.status == "error":
                 failed_labels = list(accumulated_errors.keys())
-                retry_labels = [label for label in verdict.suggested_queries if label in failed_labels]
+                override_queries = {
+                    label: str(query)
+                    for label, query in verdict.suggested_queries.items()
+                    if label in failed_labels and label in self._frames
+                }
+                retry_labels = list(override_queries)
                 for label in retry_labels:
                     accumulated_errors.pop(label, None)
                     accumulated_results.pop(label, None)
+                pending_queries_override = override_queries or None
                 reflection = verdict.reflection
                 skip_labels = set()
-                if retry_labels:
-                    only_labels = set(retry_labels)
+                if override_queries:
+                    only_labels = set(override_queries)
                 else:
                     only_labels = set(failed_labels) if failed_labels else None
             elif verdict.status == "plan":
                 for label, frame in self._frames.items():
                     try:
-                        fresh = frame.read_fresh()
+                        fresh = fresh_frames.get(label) if fresh_frames is not None else None
+                        if fresh is None:
+                            fresh = frame.read_fresh()
                     except Exception:
                         continue
                     needed = [column for column in verdict.needs_columns if column in fresh.columns]
@@ -745,6 +924,7 @@ class MultiFrameAgent:
         result.total_llm_calls = total_llm_calls
         result.converged = bool(review_history) and review_history[-1].status in ("accepted", "merge")
         result.final_verdict = review_history[-1].status if review_history else "unknown"
+        result.attempt_summaries = attempt_summaries
 
         logger.info(
             "MultiFrameAgent done: verdict=%s converged=%s llm_calls=%d attempts=%d elapsed_ms=%.2f",
@@ -777,15 +957,16 @@ class MultiFrameAgent:
                 raise ValueError(f"Method '{method}' is not allowed")
 
         local_ns: dict[str, Any] = {"df": df, "pd": pd}
-        for frame_label in self._frames:
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", frame_label):
-                local_ns.setdefault(frame_label, df)
 
         if "\n" in query_stripped or has_result_assignment:
-            exec(query_stripped, {"__builtins__": {}}, local_ns)  # noqa: S102
-            result = local_ns.get("result")
-            if result is None:
+            exec(  # noqa: S102
+                f"{query_stripped}\n__hf_final_result__ = result",
+                {"__builtins__": {}},
+                local_ns,
+            )
+            if "__hf_final_result__" not in local_ns:
                 raise ValueError("Code block must assign final output to 'result'")
+            result = local_ns["__hf_final_result__"]
         else:
             result = eval(  # noqa: S307
                 query_stripped,
@@ -805,14 +986,21 @@ class MultiFrameAgent:
         frame_result: pd.DataFrame = result
         return frame_result
 
-    def _build_schema_context(self, use_hint: bool = True) -> dict[str, str]:
+    def _build_schema_context(
+        self,
+        use_hint: bool = True,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
+    ) -> dict[str, str]:
         """Build schema + statistics context without sample rows."""
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
-            fresh = frame.read_fresh()
+            fresh = fresh_frames.get(label) if fresh_frames is not None else None
+            if fresh is None:
+                fresh = frame.read_fresh()
             hint_cols = (
-                self._columns_hint.get(label)
-                if use_hint and self._columns_hint is not None
+                columns_hint.get(label)
+                if use_hint and columns_hint is not None
                 else None
             )
 
@@ -875,14 +1063,18 @@ class MultiFrameAgent:
         self,
         n_sample: int = 3,
         use_hint: bool = True,
+        columns_hint: dict[str, list[str]] | None = None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None = None,
     ) -> dict[str, str]:
         """Build schema context with sample values for self-healing query generation."""
         contexts: dict[str, str] = {}
         for label, frame in self._frames.items():
-            fresh = frame.read_fresh()
+            fresh = fresh_frames.get(label) if fresh_frames is not None else None
+            if fresh is None:
+                fresh = frame.read_fresh()
             hint_cols = (
-                self._columns_hint.get(label)
-                if use_hint and self._columns_hint
+                columns_hint.get(label)
+                if use_hint and columns_hint
                 else None
             )
 
@@ -958,9 +1150,11 @@ class MultiFrameAgent:
         frame: "DFrame",
         columns: list[str],
         max_rows: int = 5,
+        fresh: "pd.DataFrame | None" = None,
     ) -> str:
         """Build token-efficient context using selected columns and sample rows."""
-        fresh = frame.read_fresh()
+        if fresh is None:
+            fresh = frame.read_fresh()
 
         available = [c for c in columns if c in fresh.columns]
         missing = [c for c in columns if c not in fresh.columns]
@@ -1012,6 +1206,23 @@ class MultiFrameAgent:
 
         return "\n".join(parts)
 
+    @staticmethod
+    def _normalize_columns_hint(
+        columns_hint: dict[str, list[str]] | None,
+    ) -> dict[str, list[str]] | None:
+        if columns_hint is None:
+            return None
+        normalized: dict[str, list[str]] = {}
+        for label, cols in columns_hint.items():
+            normalized[str(label)] = [str(col) for col in cols]
+        return normalized
+
+    def _snapshot_fresh_frames(self) -> dict[str, "pd.DataFrame"]:
+        snapshots: dict[str, "pd.DataFrame"] = {}
+        for label, frame in self._frames.items():
+            snapshots[label] = frame.read_fresh()
+        return snapshots
+
     async def _write_to_frame(self, operations: list[dict[str, Any]], output_frame: "DFrame") -> dict[str, Any]:
         from .writer import AgentWriter
 
@@ -1023,6 +1234,24 @@ class MultiFrameAgent:
         )
         return await writer.batch_enrich(operations)
 
+    async def _call_sample_mode_compat(
+        self,
+        instruction: str,
+        max_rows: int,
+        columns_hint: dict[str, list[str]] | None,
+        fresh_frames: dict[str, "pd.DataFrame"] | None,
+    ) -> MultiFrameResult:
+        """Call sample mode with backward compatibility for monkeypatched test doubles."""
+        params = inspect.signature(self._analyze_sample_mode).parameters
+        if "columns_hint" in params and "fresh_frames" in params:
+            return await self._analyze_sample_mode(
+                instruction,
+                max_rows,
+                columns_hint=columns_hint,
+                fresh_frames=fresh_frames,
+            )
+        return await self._analyze_sample_mode(instruction, max_rows)
+
     async def _call_llm(self, messages: list[dict[str, str]]) -> str:
         model_name = self._model or ("claude-sonnet-4-20250514" if self._provider == "anthropic" else "gpt-4o")
         logger.debug(
@@ -1033,11 +1262,20 @@ class MultiFrameAgent:
             summarize_messages(messages),
         )
         if self._provider == "anthropic":
-            raw = await self._call_anthropic(messages)
+            call_coro = self._call_anthropic(messages)
         elif self._provider == "openai":
-            raw = await self._call_openai(messages)
+            call_coro = self._call_openai(messages)
         else:
             raise ValueError(f"Unknown provider: {self._provider}. Use 'anthropic' or 'openai'.")
+        if self._llm_timeout_seconds is None:
+            raw = await call_coro
+        else:
+            try:
+                raw = await asyncio.wait_for(call_coro, timeout=self._llm_timeout_seconds)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"LLM call timed out after {self._llm_timeout_seconds} seconds"
+                ) from exc
         logger.debug(
             "multi_agent LLM_RESPONSE: provider=%s model=%s chars=%d preview=%s",
             self._provider,
