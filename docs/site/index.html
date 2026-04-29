@@ -271,7 +271,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="guides/iterative-agent/" class="md-tabs__link">
+        <a href="guides/telemetry/" class="md-tabs__link">
           
   
   
@@ -726,10 +726,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#metrics-endpoint" class="md-nav__link">
+  <a href="#telemetry" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Metrics Endpoint
+        Telemetry
       
     </span>
   </a>
@@ -1216,6 +1216,34 @@
   
   
     <li class="md-nav__item">
+      <a href="guides/telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="guides/iterative-agent/" class="md-nav__link">
         
   
@@ -1423,6 +1451,34 @@
     
   
     AgentWriter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
   
 
     
@@ -1809,10 +1865,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#metrics-endpoint" class="md-nav__link">
+  <a href="#telemetry" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Metrics Endpoint
+        Telemetry
       
     </span>
   </a>
@@ -2083,7 +2139,7 @@
 
 
 <h1 id="hiveframe">hiveframe</h1>
-<p><a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
+<p><a href="https://github.com/abadiegie/hiveframe/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
 <a href=""><img alt="Tests" src="https://img.shields.io/badge/tests-20%20passed-brightgreen" /></a>
 <a href=""><img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue" /></a>
 Transactional, distributed-ready pandas-compatible DataFrame engine.</p>
@@ -2106,6 +2162,7 @@ Transactional, distributed-ready pandas-compatible DataFrame engine.</p>
 <li><a href="#install-extras">Install extras</a></li>
 <li><a href="#pandas-api-coverage">Pandas API Coverage</a></li>
 <li><a href="#advanced-features">Advanced Features</a></li>
+<li><a href="#telemetry">Telemetry</a></li>
 <li><a href="#testing">Testing</a></li>
 <li><a href="#start-cluster">Start Cluster</a></li>
 <li><a href="#usage">Usage</a></li>
@@ -2282,7 +2339,9 @@ print(df.head())
 <li><strong><code>read_fresh_global_async()</code></strong> fans out to all connected writer nodes and merges into one complete DataFrame — must be called from an async context.</li>
 <li><strong><code>read_fresh_lazy()</code></strong> yields DataFrame chunks (default 1000 rows per chunk) from the local node, with columns matching the public DFrame API. Useful for iterating over large datasets without loading all rows at once.</li>
 <li><strong><code>read_fresh_global_lazy()</code></strong> yields DataFrame chunks (default 1000 rows per chunk) from the global merged snapshot (all cluster nodes). Only available in sync context; raises if called in an event loop.</li>
+<li><strong><code>read_fresh_global_lazy_async()</code></strong> yields DataFrame chunks from the same global merged snapshot for async contexts.</li>
 <li>If an event loop is already running, <code>read_fresh_global()</code> raises and you should use <code>await read_fresh_global_async()</code> directly.</li>
+<li>If an event loop is already running, <code>read_fresh_global_lazy()</code> raises and you should use <code>read_fresh_global_lazy_async()</code>.</li>
 <li>In <strong>standalone</strong> mode (no cluster), both methods behave identically and read from the local node.</li>
 <li>In <code>transactional=False</code> mode, reads still come from writer snapshots directly. This is the intended simple distributed mode; WAL-backed read-replica sync is not provided there.</li>
 </ul>
@@ -2382,6 +2441,7 @@ merged = await df_a.read_fresh_async()  # 3 rows total
 </code></pre>
 <ul>
 <li>Write routing: each row is mapped to a slot via <code>row_index % 1000</code> and sent to the node that owns that slot.</li>
+<li>If remote owner runtime is not available in-process, writes currently use a backward-compatible local fallback and emit a warning. Set <code>HIVEFRAME_STRICT_REMOTE_ROUTING=1</code> to fail fast instead.</li>
 <li>Rebalance: triggered automatically on <code>register()</code> (node join) and <code>mark_failed()</code> (node failure).</li>
 <li>A <code>REBALANCE</code> broadcast message is sent to all peers after every partition change.</li>
 </ul>
@@ -2678,12 +2738,15 @@ result = await writer.stream_normalize(
 )
 </code></pre>
 <p>See API details: <a href="api/agent/#agentwriter-custom-instruction">Agent API</a>.</p>
-<h3 id="metrics-endpoint">Metrics Endpoint</h3>
-<p>Expose DataFrame and cluster metrics for observability:</p>
-<pre><code class="language-python">metrics = df.get_metrics()
-print(metrics)
-# {'coordinator': {...}, 'wal': {...}, 'write_node': {...}, 'read_node': {...}, 'frame_id': ...}
-</code></pre>
+<h3 id="telemetry">Telemetry</h3>
+<p>Hiveframe telemetry is exposed through logs and result metadata:</p>
+<ul>
+<li><code>hiveframe.agent.multi</code> for query/review/fallback lifecycle</li>
+<li><code>hiveframe.agent.writer</code> for write attempts, skips, and retries</li>
+<li><code>core.write_node</code> for transactional apply/conflict flow</li>
+<li><code>MultiFrameResult</code> fields such as <code>total_llm_calls</code>, <code>final_verdict</code>, and <code>attempt_summaries</code></li>
+</ul>
+<p>See <a href="guides/telemetry/">Guides -&gt; Telemetry</a> for setup and interpretation.</p>
 <h3 id="api-improvements">API Improvements</h3>
 <ul>
 <li><code>DFrame.from_csv()</code> and <code>DFrame.from_excel()</code> for direct file loading</li>
@@ -3031,6 +3094,7 @@ Examples:
 </tr>
 </tbody>
 </table>
+<p><code>AgentWriter</code> enforces this threshold at write time: operations below <code>0.60</code> are skipped.</p>
 <p>See also:
 - <code>examples/hiveframe_import_usage.py</code>
 - <code>examples/basic_usage.py</code>

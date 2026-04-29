@@ -273,7 +273,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../iterative-agent/" class="md-tabs__link">
+        <a href="../telemetry/" class="md-tabs__link">
           
   
   
@@ -611,6 +611,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../iterative-agent/" class="md-nav__link">
         
   
@@ -770,6 +798,17 @@
     <span class="md-ellipsis">
       
         Recommended Backends
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sqlite-concurrency-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite Concurrency Note
       
     </span>
   </a>
@@ -979,6 +1018,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../api/coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../api/cluster/" class="md-nav__link">
         
   
@@ -1049,6 +1116,17 @@
     <span class="md-ellipsis">
       
         Recommended Backends
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sqlite-concurrency-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite Concurrency Note
       
     </span>
   </a>
@@ -1155,6 +1233,13 @@
 <li>Use <code>registry_backend="sqlite"</code> for zero-dependency persistent registry</li>
 <li>Use <code>transport_backend="tcp"</code> for local network communication</li>
 <li>Point every node at the same <code>db_path</code> when they should share one registry state</li>
+</ul>
+<h2 id="sqlite-concurrency-note">SQLite Concurrency Note</h2>
+<p>SQLite is great for single-machine and homelab clusters, but it is not a high-concurrency distributed registry.</p>
+<ul>
+<li>Use <code>registry_backend="sqlite"</code> for development, demos, and low-write-control-plane workloads.</li>
+<li>For heavier concurrent node join/fail traffic across multiple machines, prefer <code>registry_backend="nats"</code>.</li>
+<li>If you keep SQLite, use one shared stable path and avoid aggressive simultaneous process churn.</li>
 </ul>
 <h2 id="example">Example</h2>
 <pre><code class="language-python">from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig

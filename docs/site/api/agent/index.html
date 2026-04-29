@@ -16,7 +16,7 @@
         <link rel="prev" href="../dataframe/">
       
       
-        <link rel="next" href="../cluster/">
+        <link rel="next" href="../coordinator/">
       
       
         
@@ -271,7 +271,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../guides/iterative-agent/" class="md-tabs__link">
+        <a href="../../guides/telemetry/" class="md-tabs__link">
           
   
   
@@ -606,6 +606,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/iterative-agent/" class="md-nav__link">
         
   
@@ -903,6 +931,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#agentwriter-custom-instruction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AgentWriter Custom Instruction
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1004,10 +1043,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#multiframeresult-chart-helpers" class="md-nav__link">
+  <a href="#multiframeresult-helpers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        MultiFrameResult chart helpers
+        MultiFrameResult helpers
       
     </span>
   </a>
@@ -1045,6 +1084,34 @@
   
 </nav>
       
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -1145,6 +1212,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#agentwriter-custom-instruction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AgentWriter Custom Instruction
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1246,10 +1324,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#multiframeresult-chart-helpers" class="md-nav__link">
+  <a href="#multiframeresult-helpers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        MultiFrameResult chart helpers
+        MultiFrameResult helpers
       
     </span>
   </a>
@@ -1340,6 +1418,15 @@
 </code></pre>
 <p>For complete API reference, logging format, best practices, and debugging tips:
 <strong><a href="../../agent/stream-normalize/">Agent → Stream Normalize</a></strong></p>
+<h3 id="agentwriter-custom-instruction">AgentWriter Custom Instruction</h3>
+<p>Use <code>custom_instruction</code> to inject task-specific normalization rules into
+<code>stream_normalize(...)</code>. This improves consistency for domain-specific outputs.</p>
+<pre><code class="language-python">result = await writer.stream_normalize(
+    column=&quot;city&quot;,
+    llm_call=llm_call,
+    custom_instruction=&quot;Normalize city values to official province names&quot;,
+)
+</code></pre>
 <h2 id="relationalagentwriter-key-methods">RelationalAgentWriter Key Methods</h2>
 <ul>
 <li><code>stream_normalize_relational(target_column, instruction, chunk_size=10, provider, ...)</code> — Normalize a column using cross-frame relations</li>
@@ -1366,7 +1453,9 @@ at <code>examples/multiframe_columns_hint.py</code>.</p>
 - each generated query must start with <code>df</code>
 - forbidden patterns (<code>import</code>, <code>exec</code>, <code>eval</code>, <code>open</code>, <code>os</code>, <code>sys</code>, etc.) are rejected
 - if no queries are generated, flow falls back to sample mode
-- set <code>max_retries &gt; 0</code> to enable iterative review/retry; keep <code>max_retries=0</code> for legacy simple flow</p>
+- query mode always performs a reviewed iterative pass (<code>query -&gt; execute -&gt; review -&gt; final analysis</code>)
+- <code>max_retries=0</code> means no additional retries after the first reviewed attempt
+- increase <code>max_retries</code> to allow extra correction rounds when review verdicts are not yet sufficient</p>
 <h3 id="review-verdicts">Review Verdicts</h3>
 <table>
 <thead>
@@ -1403,10 +1492,14 @@ at <code>examples/multiframe_columns_hint.py</code>.</p>
 </tbody>
 </table>
 <p><code>MultiFrameResult</code> also includes iterative metadata:
-- <code>review_history</code> — <code>list[ReviewVerdict]</code>, one per attempt
-- <code>total_llm_calls</code> — total LLM calls (query + review + final analysis)
-- <code>converged</code> — <code>True</code> if last verdict was <code>accepted</code> or <code>merge</code>
-- <code>final_verdict</code> — last verdict status string</p>
+- <code>review_history</code> — <code>list[ReviewVerdict]</code>, one per reviewed attempt
+- <code>total_llm_calls</code> — total LLM calls (query generation + review + final analysis)
+- <code>converged</code> — <code>True</code> if the last verdict was <code>accepted</code> or <code>merge</code>
+- <code>final_verdict</code> — last verdict status string
+- <code>fallback_reason</code> — short machine-readable fallback reason when the flow drops to sample mode
+- <code>attempt_summaries</code> — per-attempt telemetry (<code>source</code>, executed labels, failed labels, verdict, optional rewrites)</p>
+<p>For logging setup and telemetry interpretation, see
+<a href="../../guides/telemetry/">Guides -&gt; Telemetry</a>.</p>
 <p>For full loop behavior, verdict handling, and examples see
 <a href="../../guides/iterative-agent/">Guides → Iterative Agent</a>.</p>
 <h3 id="result-types">Result Types</h3>
@@ -1418,10 +1511,11 @@ at <code>examples/multiframe_columns_hint.py</code>.</p>
 <p>All three are exported from <code>hiveframe.agent</code>.</p>
 <hr />
 <h2 id="seriesspec">SeriesSpec</h2>
-<p><code>SeriesSpec</code> is a structured data output produced by the LLM analysis. It holds aggregated
-data rows ready to be rendered as a chart. The user decides chart type and styling.</p>
-<pre><code>LLM query results → SeriesSpec.data → pd.DataFrame → plotly Figure → PNG
-</code></pre>
+<p><code>SeriesSpec</code> is a pure-data chart series format produced by the LLM analysis layer.
+Hiveframe stores structured x/y arrays and labels, but it does not render charts for you.</p>
+<blockquote>
+<p>hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.</p>
+</blockquote>
 <h3 id="attributes">Attributes</h3>
 <table>
 <thead>
@@ -1433,44 +1527,34 @@ data rows ready to be rendered as a chart. The user decides chart type and styli
 </thead>
 <tbody>
 <tr>
-<td><code>name</code></td>
+<td><code>label</code></td>
 <td><code>str</code></td>
-<td>Unique snake_case identifier</td>
+<td>Series identifier</td>
 </tr>
 <tr>
-<td><code>description</code></td>
+<td><code>x</code></td>
+<td><code>list[Any]</code></td>
+<td>X-axis values</td>
+</tr>
+<tr>
+<td><code>y</code></td>
+<td><code>list[Any]</code></td>
+<td>Y-axis values</td>
+</tr>
+<tr>
+<td><code>x_label</code></td>
 <td><code>str</code></td>
-<td>What the series shows — use as chart title</td>
+<td>Optional x-axis label</td>
 </tr>
 <tr>
-<td><code>data</code></td>
-<td><code>list[dict]</code></td>
-<td>Actual aggregated data rows from query results</td>
-</tr>
-<tr>
-<td><code>suggested_x</code></td>
+<td><code>y_label</code></td>
 <td><code>str</code></td>
-<td>Column suggested for x-axis</td>
+<td>Optional y-axis label</td>
 </tr>
 <tr>
-<td><code>suggested_y</code></td>
-<td><code>str \| list[str]</code></td>
-<td>Column(s) suggested for y-axis</td>
-</tr>
-<tr>
-<td><code>suggested_group_by</code></td>
-<td><code>str \| None</code></td>
-<td>Column for color grouping</td>
-</tr>
-<tr>
-<td><code>unit</code></td>
+<td><code>series_type</code></td>
 <td><code>str</code></td>
-<td>Unit label, e.g. <code>"IDR"</code>, <code>"%"</code></td>
-</tr>
-<tr>
-<td><code>source_frames</code></td>
-<td><code>list[str]</code></td>
-<td>Frame labels that produced this data</td>
+<td>Chart hint such as <code>bar</code>, <code>line</code>, <code>scatter</code>, or <code>pie</code></td>
 </tr>
 </tbody>
 </table>
@@ -1485,26 +1569,25 @@ data rows ready to be rendered as a chart. The user decides chart type and styli
 </thead>
 <tbody>
 <tr>
+<td><code>to_dict()</code></td>
+<td><code>dict</code></td>
+<td>Serialize to a JSON-friendly dictionary</td>
+</tr>
+<tr>
+<td><code>from_dict(payload)</code></td>
+<td><code>SeriesSpec</code></td>
+<td>Parse current schema or a best-effort legacy payload</td>
+</tr>
+<tr>
 <td><code>to_dataframe()</code></td>
 <td><code>pd.DataFrame</code></td>
-<td>Convert <code>data</code> to a pandas DataFrame</td>
-</tr>
-<tr>
-<td><code>to_plotly_figure(chart_type, **kwargs)</code></td>
-<td><code>go.Figure</code></td>
-<td>Render with Plotly. <code>chart_type</code>: <code>line\|bar\|scatter\|area\|pie\|histogram</code></td>
-</tr>
-<tr>
-<td><code>save_chart(path, chart_type, width, height, scale)</code></td>
-<td><code>str</code></td>
-<td>Save as PNG, returns absolute path</td>
+<td>Convert the x/y arrays into a pandas DataFrame</td>
 </tr>
 </tbody>
 </table>
-<p>Requires <code>pip install hiveframe[charts]</code> (<code>plotly&gt;=5.0</code>, <code>kaleido&gt;=0.2</code>).</p>
-<h3 id="multiframeresult-chart-helpers">MultiFrameResult chart helpers</h3>
+<h3 id="multiframeresult-helpers">MultiFrameResult helpers</h3>
 <p><code>MultiFrameResult.series</code> is a <code>list[SeriesSpec]</code> populated automatically when the LLM
-returns series data.</p>
+returns structured series data.</p>
 <table>
 <thead>
 <tr>
@@ -1515,23 +1598,11 @@ returns series data.</p>
 <tbody>
 <tr>
 <td><code>get_series(name)</code></td>
-<td>Get <code>SeriesSpec</code> by name, <code>None</code> if not found</td>
+<td>Get <code>SeriesSpec</code> by label/name, <code>None</code> if not found</td>
 </tr>
 <tr>
 <td><code>to_dataframe(name)</code></td>
-<td>Get data as <code>pd.DataFrame</code>, empty if not found</td>
-</tr>
-<tr>
-<td><code>to_plotly_figure(name, chart_type, **kwargs)</code></td>
-<td>Get Plotly figure, raises <code>KeyError</code> if not found</td>
-</tr>
-<tr>
-<td><code>save_chart(name, path, chart_type, **kwargs)</code></td>
-<td>Save one series as PNG</td>
-</tr>
-<tr>
-<td><code>save_all_charts(output_dir, chart_type)</code></td>
-<td>Save all series as PNGs, skips failures silently</td>
+<td>Convert one series to <code>pd.DataFrame</code>, empty if not found</td>
 </tr>
 </tbody>
 </table>
@@ -1556,18 +1627,8 @@ async def main() -&gt; None:
     df = result.to_dataframe(&quot;revenue_trend&quot;)
     print(df)
 
-    # User decides chart type
-    fig = result.to_plotly_figure(&quot;revenue_trend&quot;, chart_type=&quot;line&quot;, title=&quot;Revenue Q1&quot;)
-    fig.show()
-
-    # Save as PNG (requires kaleido)
-    path = result.save_chart(&quot;revenue_trend&quot;, &quot;output/revenue.png&quot;, chart_type=&quot;bar&quot;)
-    print(f&quot;Saved: {path}&quot;)
-
-    # Save all series at once
-    paths = result.save_all_charts(&quot;output/charts/&quot;)
-    for name, p in paths.items():
-        print(f&quot;{name}: {p}&quot;)
+    # Use pandas, matplotlib, seaborn, Plotly, Vega-Lite, or anything else you prefer.
+    # hiveframe only guarantees the structured data payload.
 
 asyncio.run(main())
 </code></pre>
