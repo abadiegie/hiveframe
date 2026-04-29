@@ -1,6 +1,6 @@
 # hiveframe
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/abadiegie/hiveframe/blob/main/LICENSE)
 [![Tests](https://img.shields.io/badge/tests-20%20passed-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 Transactional, distributed-ready pandas-compatible DataFrame engine.

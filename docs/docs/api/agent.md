@@ -42,6 +42,19 @@ result = await writer.stream_normalize(
 For complete API reference, logging format, best practices, and debugging tips:
 **[Agent → Stream Normalize](../agent/stream-normalize.md)**
 
+### AgentWriter Custom Instruction
+
+Use `custom_instruction` to inject task-specific normalization rules into
+`stream_normalize(...)`. This improves consistency for domain-specific outputs.
+
+```python
+result = await writer.stream_normalize(
+    column="city",
+    llm_call=llm_call,
+    custom_instruction="Normalize city values to official province names",
+)
+```
+
 ## RelationalAgentWriter Key Methods
 
 - `stream_normalize_relational(target_column, instruction, chunk_size=10, provider, ...)` — Normalize a column using cross-frame relations

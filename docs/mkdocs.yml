@@ -41,4 +41,5 @@ nav:
   - API Reference:
     - DFrame: api/dataframe.md
     - AgentWriter: api/agent.md
+    - TransactionCoordinator: api/coordinator.md
     - Cluster: api/cluster.md
