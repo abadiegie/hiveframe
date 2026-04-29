@@ -28,6 +28,7 @@ Note: `TCPTransport` now uses real asyncio TCP sockets for cluster runtime traff
 - [Install extras](#install-extras)
 - [Pandas API Coverage](#pandas-api-coverage)
 - [Advanced Features](#advanced-features)
+- [Telemetry](#telemetry)
 - [Testing](#testing)
 - [Start Cluster](#start-cluster)
 - [Usage](#usage)
@@ -156,7 +157,9 @@ Core principle of DFrame:
 - **`read_fresh_global_async()`** fans out to all connected writer nodes and merges into one complete DataFrame — must be called from an async context.
 - **`read_fresh_lazy()`** yields DataFrame chunks (default 1000 rows per chunk) from the local node, with columns matching the public DFrame API. Useful for iterating over large datasets without loading all rows at once.
 - **`read_fresh_global_lazy()`** yields DataFrame chunks (default 1000 rows per chunk) from the global merged snapshot (all cluster nodes). Only available in sync context; raises if called in an event loop.
+- **`read_fresh_global_lazy_async()`** yields DataFrame chunks from the same global merged snapshot for async contexts.
 - If an event loop is already running, `read_fresh_global()` raises and you should use `await read_fresh_global_async()` directly.
+- If an event loop is already running, `read_fresh_global_lazy()` raises and you should use `read_fresh_global_lazy_async()`.
 - In **standalone** mode (no cluster), both methods behave identically and read from the local node.
 - In `transactional=False` mode, reads still come from writer snapshots directly. This is the intended simple distributed mode; WAL-backed read-replica sync is not provided there.
 
@@ -278,6 +281,7 @@ Partitions are assigned and rebalanced automatically when writer nodes join or f
 ```
 
 - Write routing: each row is mapped to a slot via `row_index % 1000` and sent to the node that owns that slot.
+- If remote owner runtime is not available in-process, writes currently use a backward-compatible local fallback and emit a warning. Set `HIVEFRAME_STRICT_REMOTE_ROUTING=1` to fail fast instead.
 - Rebalance: triggered automatically on `register()` (node join) and `mark_failed()` (node failure).
 - A `REBALANCE` broadcast message is sent to all peers after every partition change.
 
@@ -484,15 +488,16 @@ result = await writer.stream_normalize(
 
 See API details: [Agent API](api/agent.md#agentwriter-custom-instruction).
 
-### Metrics Endpoint
+### Telemetry
 
-Expose DataFrame and cluster metrics for observability:
+Hiveframe telemetry is exposed through logs and result metadata:
 
-```python
-metrics = df.get_metrics()
-print(metrics)
-# {'coordinator': {...}, 'wal': {...}, 'write_node': {...}, 'read_node': {...}, 'frame_id': ...}
-```
+- `hiveframe.agent.multi` for query/review/fallback lifecycle
+- `hiveframe.agent.writer` for write attempts, skips, and retries
+- `core.write_node` for transactional apply/conflict flow
+- `MultiFrameResult` fields such as `total_llm_calls`, `final_verdict`, and `attempt_summaries`
+
+See [Guides -> Telemetry](guides/telemetry.md) for setup and interpretation.
 
 ### API Improvements
 
@@ -884,6 +889,8 @@ Examples:
 | 0.80 – 0.94 | Confident (strong inference) |
 | 0.60 – 0.79 | Moderate (plausible but uncertain) |
 | < 0.60 | Do not write — return clarification request to user |
+
+`AgentWriter` enforces this threshold at write time: operations below `0.60` are skipped.
 
 See also:
 - `examples/hiveframe_import_usage.py`

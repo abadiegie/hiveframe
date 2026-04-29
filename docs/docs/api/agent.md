@@ -71,7 +71,9 @@ In `query` mode:
 - each generated query must start with `df`
 - forbidden patterns (`import`, `exec`, `eval`, `open`, `os`, `sys`, etc.) are rejected
 - if no queries are generated, flow falls back to sample mode
-- set `max_retries > 0` to enable iterative review/retry; keep `max_retries=0` for legacy simple flow
+- query mode always performs a reviewed iterative pass (`query -> execute -> review -> final analysis`)
+- `max_retries=0` means no additional retries after the first reviewed attempt
+- increase `max_retries` to allow extra correction rounds when review verdicts are not yet sufficient
 
 ### Review Verdicts
 
@@ -85,10 +87,15 @@ In `query` mode:
 | `rejected` | Results not relevant — wrong approach |
 
 `MultiFrameResult` also includes iterative metadata:
-- `review_history` — `list[ReviewVerdict]`, one per attempt
-- `total_llm_calls` — total LLM calls (query + review + final analysis)
-- `converged` — `True` if last verdict was `accepted` or `merge`
+- `review_history` — `list[ReviewVerdict]`, one per reviewed attempt
+- `total_llm_calls` — total LLM calls (query generation + review + final analysis)
+- `converged` — `True` if the last verdict was `accepted` or `merge`
 - `final_verdict` — last verdict status string
+- `fallback_reason` — short machine-readable fallback reason when the flow drops to sample mode
+- `attempt_summaries` — per-attempt telemetry (`source`, executed labels, failed labels, verdict, optional rewrites)
+
+For logging setup and telemetry interpretation, see
+[Guides -> Telemetry](../guides/telemetry.md).
 
 For full loop behavior, verdict handling, and examples see
 [Guides → Iterative Agent](../guides/iterative-agent.md).
@@ -105,48 +112,39 @@ All three are exported from `hiveframe.agent`.
 
 ## SeriesSpec
 
-`SeriesSpec` is a structured data output produced by the LLM analysis. It holds aggregated
-data rows ready to be rendered as a chart. The user decides chart type and styling.
+`SeriesSpec` is a pure-data chart series format produced by the LLM analysis layer.
+Hiveframe stores structured x/y arrays and labels, but it does not render charts for you.
 
-```
-LLM query results → SeriesSpec.data → pd.DataFrame → plotly Figure → PNG
-```
+> hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.
 
 ### Attributes
 
 | Attribute | Type | Description |
 |---|---|---|
-| `name` | `str` | Unique snake_case identifier |
-| `description` | `str` | What the series shows — use as chart title |
-| `data` | `list[dict]` | Actual aggregated data rows from query results |
-| `suggested_x` | `str` | Column suggested for x-axis |
-| `suggested_y` | `str \| list[str]` | Column(s) suggested for y-axis |
-| `suggested_group_by` | `str \| None` | Column for color grouping |
-| `unit` | `str` | Unit label, e.g. `"IDR"`, `"%"` |
-| `source_frames` | `list[str]` | Frame labels that produced this data |
+| `label` | `str` | Series identifier |
+| `x` | `list[Any]` | X-axis values |
+| `y` | `list[Any]` | Y-axis values |
+| `x_label` | `str` | Optional x-axis label |
+| `y_label` | `str` | Optional y-axis label |
+| `series_type` | `str` | Chart hint such as `bar`, `line`, `scatter`, or `pie` |
 
 ### Methods
 
 | Method | Returns | Description |
 |---|---|---|
-| `to_dataframe()` | `pd.DataFrame` | Convert `data` to a pandas DataFrame |
-| `to_plotly_figure(chart_type, **kwargs)` | `go.Figure` | Render with Plotly. `chart_type`: `line\|bar\|scatter\|area\|pie\|histogram` |
-| `save_chart(path, chart_type, width, height, scale)` | `str` | Save as PNG, returns absolute path |
+| `to_dict()` | `dict` | Serialize to a JSON-friendly dictionary |
+| `from_dict(payload)` | `SeriesSpec` | Parse current schema or a best-effort legacy payload |
+| `to_dataframe()` | `pd.DataFrame` | Convert the x/y arrays into a pandas DataFrame |
 
-Requires `pip install hiveframe[charts]` (`plotly>=5.0`, `kaleido>=0.2`).
-
-### MultiFrameResult chart helpers
+### MultiFrameResult helpers
 
 `MultiFrameResult.series` is a `list[SeriesSpec]` populated automatically when the LLM
-returns series data.
+returns structured series data.
 
 | Method | Description |
 |---|---|
-| `get_series(name)` | Get `SeriesSpec` by name, `None` if not found |
-| `to_dataframe(name)` | Get data as `pd.DataFrame`, empty if not found |
-| `to_plotly_figure(name, chart_type, **kwargs)` | Get Plotly figure, raises `KeyError` if not found |
-| `save_chart(name, path, chart_type, **kwargs)` | Save one series as PNG |
-| `save_all_charts(output_dir, chart_type)` | Save all series as PNGs, skips failures silently |
+| `get_series(name)` | Get `SeriesSpec` by label/name, `None` if not found |
+| `to_dataframe(name)` | Convert one series to `pd.DataFrame`, empty if not found |
 
 ### Example
 
@@ -171,18 +169,8 @@ async def main() -> None:
     df = result.to_dataframe("revenue_trend")
     print(df)
 
-    # User decides chart type
-    fig = result.to_plotly_figure("revenue_trend", chart_type="line", title="Revenue Q1")
-    fig.show()
-
-    # Save as PNG (requires kaleido)
-    path = result.save_chart("revenue_trend", "output/revenue.png", chart_type="bar")
-    print(f"Saved: {path}")
-
-    # Save all series at once
-    paths = result.save_all_charts("output/charts/")
-    for name, p in paths.items():
-        print(f"{name}: {p}")
+    # Use pandas, matplotlib, seaborn, Plotly, Vega-Lite, or anything else you prefer.
+    # hiveframe only guarantees the structured data payload.
 
 asyncio.run(main())
 ```

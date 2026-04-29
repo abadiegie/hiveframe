@@ -71,6 +71,7 @@ pytest
 | LLM AgentWriter & MultiFrameAgent | [API Reference → AgentWriter](https://abadiegie.github.io/hiveframe/api/agent/) |
 | Checkpoint & Rollback | [Guides → Checkpoint](https://abadiegie.github.io/hiveframe/guides/checkpoint/) |
 | Cell History (audit trail) | [Guides → Cell History](https://abadiegie.github.io/hiveframe/guides/cell-history/) |
+| Telemetry & observability | [Guides → Telemetry](https://abadiegie.github.io/hiveframe/guides/telemetry/) |
 | Homelab / multi-node setup | [Guides → Homelab Setup](https://abadiegie.github.io/hiveframe/guides/homelab-setup/) |
 | Getting started walkthrough | [Getting Started](https://abadiegie.github.io/hiveframe/getting-started/) |
 
@@ -108,10 +109,15 @@ async def main():
         provider="anthropic",
     )
     result = await agent.analyze("City mana score tinggi tapi stock rendah?", mode="query")
+    print(result.final_verdict, result.total_llm_calls)
+    print(result.attempt_summaries)
     print(result.to_markdown())
 
 asyncio.run(main())
 ```
+
+`result.series` is structured data only. hiveframe outputs data, not visualizations.
+What you do with that data is entirely up to you.
 
 ### Cluster mode (multi-writer global read)
 

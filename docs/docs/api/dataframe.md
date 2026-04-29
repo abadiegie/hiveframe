@@ -16,13 +16,17 @@ By default, `DFrame` runs in transactional mode. You can set `transactional=Fals
 - `from_runtime(runtime, data, frame_id=None, transactional=True)` — Attach to a cluster runtime
 - `read_fresh()` — Get the latest local snapshot
 - `read_fresh_global()` — Get merged snapshot from all cluster nodes
+- `await read_fresh_global_async()` — Get merged snapshot from all cluster nodes (async)
 - `read_fresh_lazy(chunk_size=1000)` — Iterate over local data in chunks
 - `read_fresh_global_lazy(chunk_size=1000)` — Iterate over global data in chunks
+- `read_fresh_global_lazy_async(chunk_size=1000)` — Iterate over global data in chunks (async)
 - `checkpoint(label=None)` — Save a checkpoint
 - `rollback(checkpoint_id)` — Restore to a checkpoint
 - `cell_history(col, row_idx)` — Get audit trail for a cell
-- `get_metrics()` — Get DataFrame and cluster metrics
 - `describe_for_agent()` — Build LLM context string
+
+For runtime observability (logs, agent attempt telemetry, and audit trail patterns), see
+[Guides -> Telemetry](../guides/telemetry.md).
 
 When `transactional=False`:
 - writes bypass lock-manager + WAL lifecycle,
@@ -31,6 +35,11 @@ When `transactional=False`:
 - read-replica sync is not provided,
 - `cell_history()` returns `[]`,
 - `checkpoint()` and `rollback()` raise `RuntimeError`.
+
+Async caveats:
+- `read_fresh_global()` is sync-only. Inside an active event loop, call `await read_fresh_global_async()`.
+- `read_fresh_global_lazy()` is sync-only. Inside an active event loop, use `async for ... in read_fresh_global_lazy_async(...)`.
+- In cluster mode with `transactional=False`, global reads come from writer snapshots directly; WAL-backed replica convergence is not available.
 
 ## Example
 

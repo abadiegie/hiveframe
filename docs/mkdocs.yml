@@ -33,6 +33,7 @@ nav:
     - Columns Hint: agent/columns-hint.md
     - Relational Writer: agent/relational-writer.md
   - Guides:
+    - Telemetry: guides/telemetry.md
     - Iterative Agent: guides/iterative-agent.md
     - Checkpoint & Rollback: guides/checkpoint.md
     - Cell History: guides/cell-history.md
