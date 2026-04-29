@@ -55,6 +55,16 @@ class WriteNode:
                         self._ensure_row(row_idx)
                         if col not in self._df.columns:
                             self._df[col] = [None] * len(self._df.index)
+                        current_value = self._df.at[row_idx, col]
+                        if not self._values_match(current_value, op.old_value):
+                            logger.warning(
+                                "WriteNode.apply optimistic conflict tx_id=%s cell=%s current=%r expected=%r",
+                                transaction.tx_id,
+                                op.cell_id,
+                                current_value,
+                                op.old_value,
+                            )
+                            return False
                         self._df.at[row_idx, col] = op.new_value
                         delta.append(op.to_dict())
                     self._version += 1
@@ -71,6 +81,17 @@ class WriteNode:
                         self._ensure_row(row_idx)
                         if col not in self._df.columns:
                             self._df[col] = [None] * len(self._df.index)
+                        current_value = self._df.at[row_idx, col]
+                        if not self._values_match(current_value, op.old_value):
+                            logger.warning(
+                                "WriteNode.apply optimistic conflict tx_id=%s cell=%s current=%r expected=%r",
+                                transaction.tx_id,
+                                op.cell_id,
+                                current_value,
+                                op.old_value,
+                            )
+                            self._df = snapshot
+                            return False
                         self._df.at[row_idx, col] = op.new_value
                         delta.append(op.to_dict())
                     self._version += 1
@@ -129,6 +150,16 @@ class WriteNode:
         target_len = row_idx + 1
         if len(self._df.index) < target_len:
             self._df = self._df.reindex(range(target_len))
+
+    @staticmethod
+    def _values_match(current_value: Any, expected_value: Any) -> bool:
+        if pd.isna(current_value) and expected_value is None:
+            return True
+        if pd.isna(expected_value) and current_value is None:
+            return True
+        if pd.isna(current_value) and pd.isna(expected_value):
+            return True
+        return current_value == expected_value
 
     @staticmethod
     def _parse_cell_id(cell_id: str) -> tuple[str, int]:

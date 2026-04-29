@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterable, Callable, Iterable
 import asyncio
@@ -91,6 +92,7 @@ class DFrame:
         self._frame_id = frame_id or _uuid.uuid4().hex
         self._schema = schema or {}
         self._transactional = transactional
+        self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "0") == "1"
         # Simple short-lived cache for the local snapshot to avoid repeated builds
         # when users call multiple read properties/operators in quick succession.
         self._snapshot_cache: tuple[pd.DataFrame, float] | None = None  # (frame, ts)
@@ -738,7 +740,16 @@ class DFrame:
         remote_runtime = _RuntimeRegistry.get(node_id)
         if remote_runtime is not None:
             return remote_runtime.coordinator
-        # Fallback: write locally if remote runtime is not reachable.
+        if self._strict_remote_routing:
+            raise RuntimeError(
+                f"Cannot resolve remote coordinator for node '{node_id}'. "
+                "Set HIVEFRAME_STRICT_REMOTE_ROUTING=0 to allow local fallback."
+            )
+        logger.warning(
+            "_resolve_coordinator: remote runtime '%s' not found, using local fallback",
+            node_id,
+        )
+        # Backward-compatible fallback: write locally if remote runtime is not reachable.
         return self._coordinator
 
     @staticmethod
@@ -815,7 +826,7 @@ class DFrame:
         except RuntimeError:
             return asyncio.run(self.read_fresh_global_async())
         raise RuntimeError(
-            "read_global() cannot be called while an event loop is running; "
+            "read_fresh_global() cannot be called while an event loop is running; "
             "use 'await read_fresh_global_async()' instead."
         )
 
@@ -868,8 +879,27 @@ class DFrame:
             return
         raise RuntimeError(
             "read_fresh_global_lazy() cannot be called while an event loop is running; "
-            "use 'await read_fresh_global_async()' and chunk manually instead."
+            "use 'async for chunk in read_fresh_global_lazy_async(...)' instead."
         )
+
+    async def read_fresh_global_lazy_async(
+        self,
+        columns: list[str] | None = None,
+        chunk_size: int = 1000,
+    ):
+        """Yield DataFrame chunks lazily from the global merged snapshot in async contexts.
+
+        This is the async counterpart of read_fresh_global_lazy(). It avoids sync wrappers
+        inside running event loops and keeps the same chunking contract.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+        df = await self.read_fresh_global_async()
+        if columns is not None:
+            df = df[columns]
+        total_rows = len(df)
+        for start in range(0, total_rows, chunk_size):
+            yield df.iloc[start:start + chunk_size].copy()
 
     def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000):
         """Yield DataFrame chunks lazily from the local write-node snapshot.
@@ -909,6 +939,7 @@ class DFrame:
     # Deprecated/legacy aliases for backward compatibility (optional, can remove for strictness)
     read_global = read_fresh_global
     read_global_lazy = read_fresh_global_lazy
+    read_global_lazy_async = read_fresh_global_lazy_async
     read_fresh_async = read_fresh_global_async
 
     # -------------------------------------------------------------------------
