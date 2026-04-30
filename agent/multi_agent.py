@@ -145,10 +145,7 @@ def _replace_frame_label_variables(code: str, known_labels: set[str]) -> tuple[s
 
 
 def _replace_column_case_literals(code: str, columns: list[str]) -> tuple[str, bool]:
-    """Rewrite quoted column-name literals that are a case-only mismatch with real columns.
-
-    Works line-by-line so newlines in the original code are always preserved.
-    """
+    """Rewrite case-mismatched column names only in DataFrame selector contexts."""
     if not columns:
         return code, False
 
@@ -163,23 +160,59 @@ def _replace_column_case_literals(code: str, columns: list[str]) -> tuple[str, b
         if lower not in ambiguous:
             canonical_by_lower[lower] = column
 
-    lines = code.split("\n")
     changed = False
-    result_lines: list[str] = []
-    for line in lines:
-        new_line = line
-        for wrong_lower, correct in canonical_by_lower.items():
-            new_line = re.sub(
-                rf"(['\"]){re.escape(wrong_lower)}\1",
-                lambda m, c=correct: f"{m.group(1)}{c}{m.group(1)}",
-                new_line,
-                flags=re.IGNORECASE,
-            )
-        if new_line != line:
-            changed = True
-        result_lines.append(new_line)
+    if not canonical_by_lower:
+        return code, False
 
-    return "\n".join(result_lines), changed
+    def replace_name(name: str) -> str:
+        return canonical_by_lower.get(name.lower(), name)
+
+    def replace_single_selector(match: re.Match[str]) -> str:
+        nonlocal changed
+        name = match.group("name")
+        updated = replace_name(name)
+        if updated != name:
+            changed = True
+        return f"{match.group('prefix')}{match.group('quote')}{updated}{match.group('quote')}{match.group('suffix')}"
+
+    def replace_list_selector(match: re.Match[str]) -> str:
+        nonlocal changed
+        body = match.group("body")
+
+        def replace_item(item_match: re.Match[str]) -> str:
+            nonlocal changed
+            name = item_match.group("name")
+            updated = replace_name(name)
+            if updated != name:
+                changed = True
+            return f"{item_match.group('quote')}{updated}{item_match.group('quote')}"
+
+        updated_body = re.sub(
+            r"(?P<quote>['\"])(?P<name>[^'\"]+)(?P=quote)",
+            replace_item,
+            body,
+        )
+        return f"{match.group('prefix')}{updated_body}{match.group('suffix')}"
+
+    rewritten = code
+    selector_patterns = (
+        re.compile(
+            r"(?P<prefix>\bdf\s*\[\s*)(?P<quote>['\"])(?P<name>[^'\"]+)(?P=quote)(?P<suffix>\s*\])"
+        ),
+        re.compile(
+            r"(?P<prefix>\.(?:loc|at)\s*\[\s*[^,\]]+\s*,\s*)(?P<quote>['\"])(?P<name>[^'\"]+)(?P=quote)(?P<suffix>\s*\])"
+        ),
+    )
+    list_selector_patterns = (
+        re.compile(r"(?P<prefix>\bdf\s*\[\s*\[)(?P<body>[\s\S]*?)(?P<suffix>\]\s*\])"),
+        re.compile(r"(?P<prefix>\.(?:loc|at)\s*\[\s*[^,\]]+\s*,\s*\[)(?P<body>[\s\S]*?)(?P<suffix>\]\s*\])"),
+    )
+    for pattern in selector_patterns:
+        rewritten = pattern.sub(replace_single_selector, rewritten)
+    for pattern in list_selector_patterns:
+        rewritten = pattern.sub(replace_list_selector, rewritten)
+
+    return rewritten, changed
 
 
 def _rewrite_generated_code(
@@ -517,6 +550,7 @@ class MultiFrameAgent:
                     max_rows=max_rows,
                     include_schema=True,
                     include_stats=True,
+                    fresh=cached_fresh,
                 )
 
         messages = build_multi_frame_messages(

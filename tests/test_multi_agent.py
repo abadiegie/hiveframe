@@ -106,6 +106,30 @@ def test_rewrite_generated_code_rewrites_frame_variable_and_column_case(frame_sa
     assert "column_case_match" in applied
 
 
+def test_rewrite_generated_code_preserves_non_selector_string_literals(frame_sales: DFrame) -> None:
+    rewritten, applied = _rewrite_generated_code(
+        code="result = df[df['city'] == 'CITY']",
+        frame_label="sales",
+        columns=list(frame_sales.read_fresh().columns),
+        known_labels={"sales"},
+    )
+
+    assert rewritten == "result = df[df['city'] == 'CITY']"
+    assert "column_case_match" not in applied
+
+
+def test_rewrite_generated_code_rewrites_column_lists(frame_sales: DFrame) -> None:
+    rewritten, applied = _rewrite_generated_code(
+        code="result = df[['CITY', 'score']]",
+        frame_label="sales",
+        columns=list(frame_sales.read_fresh().columns),
+        known_labels={"sales"},
+    )
+
+    assert rewritten == "result = df[['city', 'score']]"
+    assert "column_case_match" in applied
+
+
 def test_schema_context_contains_shape(frame_sales: DFrame) -> None:
     agent = MultiFrameAgent(frames={"sales": frame_sales})
     ctx = agent._build_schema_context()["sales"]
@@ -168,6 +192,30 @@ def test_analyze_sample_returns_multi_frame_result(frame_sales: DFrame, monkeypa
     monkeypatch.setattr(agent, "_call_llm", fake_call)
     result = asyncio.run(agent.analyze("x", mode="sample"))
     assert isinstance(result, MultiFrameResult)
+
+
+def test_analyze_sample_reuses_single_snapshot_per_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    sales = DFrame({"product_id": ["a", "b"], "qty": [1, 2]})
+    agent = MultiFrameAgent(frames={"sales": sales})
+    responses = ['{"action":"analyze","analysis":"ok","insights":[],"operations":[]}']
+
+    reads = {"count": 0}
+    original_read_fresh = sales.read_fresh
+
+    def counted_read_fresh():
+        reads["count"] += 1
+        return original_read_fresh()
+
+    async def fake_call(_messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    sales.read_fresh = counted_read_fresh  # type: ignore[assignment]
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+
+    result = asyncio.run(agent.analyze("x", mode="sample"))
+
+    assert result.analysis == "ok"
+    assert reads["count"] == 1
 
 
 def test_analyze_query_two_llm_calls(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
