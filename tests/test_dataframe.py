@@ -61,6 +61,16 @@ def test_read_node_lag_and_read_fresh() -> None:
     assert fresh.at[0, "name"] == "Alicia"
 
 
+def test_read_fresh_returns_defensive_copy() -> None:
+    df = DFrame({"name": ["Alice"]})
+
+    fresh = df.read_fresh()
+    fresh.at[0, "name"] = "Mutated"
+
+    next_fresh = df.read_fresh()
+    assert next_fresh.at[0, "name"] == "Alice"
+
+
 def test_to_persistent_and_reload() -> None:
     df = DFrame({"x": [1, 2]})
     time.sleep(0.1)

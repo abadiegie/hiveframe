@@ -23,8 +23,8 @@ logger = logging.getLogger("core.write_node")
 class WriteNode:
     """Thread-safe mutable store for transactional writes.
 
-    If bulk_mode is True, apply() skips defensive copy and rollback for high-throughput batch ingest.
-    This is now the default for all WriteNode instances.
+    ``bulk_mode`` remains a throughput hint, but apply() still preserves atomic rollback
+    semantics on conflicts or exceptions.
     """
 
     def __init__(self, initial_data: dict[str, list[Any]] | None = None, bulk_mode: bool = True) -> None:
@@ -40,65 +40,35 @@ class WriteNode:
         self._delta_callback = callback
 
     def apply(self, transaction: Transaction) -> bool:
-        """Apply transaction operations atomically with rollback snapshot, unless bulk_mode is enabled.
-
-        In bulk_mode, skips defensive copy and rollback for high-throughput batch ingest.
-        """
+        """Apply transaction operations atomically with rollback on failure."""
         logger.debug("WriteNode.apply start tx_id=%s ops=%d bulk_mode=%s", transaction.tx_id, len(transaction.operations), self._bulk_mode)
         with self._lock:
-            if self._bulk_mode or getattr(transaction, 'bulk_mode', False):
-                # Bulk mode: skip defensive copy, apply all ops directly
-                try:
-                    delta: list[dict[str, Any]] = []
-                    for op in transaction.operations:
-                        col, row_idx = self._parse_cell_id(op.cell_id)
-                        self._ensure_row(row_idx)
-                        if col not in self._df.columns:
-                            self._df[col] = [None] * len(self._df.index)
-                        current_value = self._df.at[row_idx, col]
-                        if not self._values_match(current_value, op.old_value):
-                            logger.warning(
-                                "WriteNode.apply optimistic conflict tx_id=%s cell=%s current=%r expected=%r",
-                                transaction.tx_id,
-                                op.cell_id,
-                                current_value,
-                                op.old_value,
-                            )
-                            return False
-                        self._df.at[row_idx, col] = op.new_value
-                        delta.append(op.to_dict())
-                    self._version += 1
-                except Exception as e:
-                    logger.exception("WriteNode.apply (bulk) failed tx_id=%s error=%s", transaction.tx_id, e)
-                    return False
-            else:
-                # Strict mode: defensive copy for rollback
-                snapshot = self._df.copy(deep=True)
-                try:
-                    delta: list[dict[str, Any]] = []
-                    for op in transaction.operations:
-                        col, row_idx = self._parse_cell_id(op.cell_id)
-                        self._ensure_row(row_idx)
-                        if col not in self._df.columns:
-                            self._df[col] = [None] * len(self._df.index)
-                        current_value = self._df.at[row_idx, col]
-                        if not self._values_match(current_value, op.old_value):
-                            logger.warning(
-                                "WriteNode.apply optimistic conflict tx_id=%s cell=%s current=%r expected=%r",
-                                transaction.tx_id,
-                                op.cell_id,
-                                current_value,
-                                op.old_value,
-                            )
-                            self._df = snapshot
-                            return False
-                        self._df.at[row_idx, col] = op.new_value
-                        delta.append(op.to_dict())
-                    self._version += 1
-                except Exception as e:
-                    self._df = snapshot
-                    logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
-                    return False
+            snapshot = self._df.copy(deep=True)
+            try:
+                delta: list[dict[str, Any]] = []
+                for op in transaction.operations:
+                    col, row_idx = self._parse_cell_id(op.cell_id)
+                    self._ensure_row(row_idx)
+                    if col not in self._df.columns:
+                        self._df[col] = [None] * len(self._df.index)
+                    current_value = self._df.at[row_idx, col]
+                    if not self._values_match(current_value, op.old_value):
+                        logger.warning(
+                            "WriteNode.apply optimistic conflict tx_id=%s cell=%s current=%r expected=%r",
+                            transaction.tx_id,
+                            op.cell_id,
+                            current_value,
+                            op.old_value,
+                        )
+                        self._df = snapshot
+                        return False
+                    self._df.at[row_idx, col] = op.new_value
+                    delta.append(op.to_dict())
+                self._version += 1
+            except Exception as e:
+                self._df = snapshot
+                logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
+                return False
 
         if self._delta_callback is not None:
             logger.debug("WriteNode.apply dispatching delta callback tx_id=%s version=%d ops=%d", transaction.tx_id, self._version, len(delta))

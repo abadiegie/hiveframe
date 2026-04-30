@@ -323,10 +323,12 @@ class DFrame:
         max_rows: int = 20,
         include_schema: bool = True,
         include_stats: bool = True,
+        fresh: pd.DataFrame | None = None,
     ) -> str:
         """Build rich context string for LLM agent."""
         parts = []
-        fresh = self.read_fresh()
+        if fresh is None:
+            fresh = self.read_fresh()
         if include_schema and self._schema:
             parts.append("## Schema")
             for col, schema in self._schema.items():
@@ -795,7 +797,6 @@ class DFrame:
             if now - ts <= self._snapshot_cache_ttl:
                 return frame
         frame = self._build_local_snapshot()
-        # store shallow copy to avoid external mutation
         self._snapshot_cache = (frame, now)
         return frame
 
@@ -812,7 +813,7 @@ class DFrame:
         owning writer snapshot.
         For global cluster reads (fan-out across all nodes), use read_fresh_async().
         """
-        return self._get_cached_snapshot()
+        return self._get_cached_snapshot().copy(deep=True)
 
     def read_fresh_global(self) -> pd.DataFrame:
         """Return a global merged snapshot from sync code.
