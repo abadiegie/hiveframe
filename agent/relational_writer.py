@@ -319,6 +319,9 @@ class RelationalAgentWriter:
         from .prompt import parse_plan
         from .writer import AgentWriter
 
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+
         self._build_cache()
 
         writer = AgentWriter(
@@ -346,7 +349,7 @@ class RelationalAgentWriter:
 
         for i in range(0, total, chunk_size):
             chunk = fresh.iloc[i : i + chunk_size]
-            chunk_rows = [(i + j, row.to_dict()) for j, (_, row) in enumerate(chunk.iterrows())]
+            chunk_rows = list(zip(chunk.index.tolist(), chunk.to_dict(orient="records"), strict=False))
 
             enriched_context = self._build_enriched_context(chunk_rows)
             messages = self._build_messages(

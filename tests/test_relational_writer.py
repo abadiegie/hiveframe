@@ -421,6 +421,25 @@ def test_stream_normalize_chunk_size_respected(monkeypatch: pytest.MonkeyPatch) 
     assert calls["count"] == 3
 
 
+def test_stream_normalize_invalid_chunk_size_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = _writer_many_to_one()
+    monkeypatch.setattr(
+        writer,
+        "_make_llm_caller",
+        lambda *args, **kwargs: _build_mock_llm(target_column="stance", value_prefix="s", confidence=0.9),
+    )
+
+    with pytest.raises(ValueError, match="chunk_size must be > 0"):
+        asyncio.run(
+            writer.stream_normalize_relational(
+                target_column="stance",
+                instruction="classify",
+                chunk_size=0,
+                provider="anthropic",
+            )
+        )
+
+
 def test_stream_normalize_low_confidence_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     writer = _writer_many_to_one()
     monkeypatch.setattr(
