@@ -273,7 +273,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="../iterative-agent/" class="md-tabs__link">
+        <a href="../telemetry/" class="md-tabs__link">
           
   
   
@@ -611,6 +611,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../iterative-agent/" class="md-nav__link">
         
   
@@ -742,6 +770,17 @@
     <span class="md-ellipsis">
       
         Usage
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#non-transactional-mode-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-transactional mode note
       
     </span>
   </a>
@@ -907,6 +946,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../api/coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../api/cluster/" class="md-nav__link">
         
   
@@ -983,6 +1050,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#non-transactional-mode-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Non-transactional mode note
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1006,12 +1084,19 @@
 <h1 id="cell-history-guide">Cell History Guide</h1>
 <h2 id="overview">Overview</h2>
 <p>Cell history provides a full audit trail for every cell in a DFrame.</p>
+<p>This feature is available only when <code>transactional=True</code> (default).
+If you run a frame with <code>transactional=False</code>, <code>cell_history(...)</code> returns an empty list by design.</p>
 <h2 id="usage">Usage</h2>
 <pre><code class="language-python">history = df.cell_history(&quot;city&quot;, 0)
 for h in history:
     print(h)
 </code></pre>
 <p>This is useful for compliance, debugging, and understanding data provenance.</p>
+<h2 id="non-transactional-mode-note">Non-transactional mode note</h2>
+<pre><code class="language-python">df = hf.DFrame({&quot;city&quot;: [&quot;jakarta&quot;]}, transactional=False)
+assert df.cell_history(&quot;city&quot;, 0) == []
+</code></pre>
+<p>Use transactional mode if you need audit trails, checkpoints, or rollback semantics.</p>
 
 
 

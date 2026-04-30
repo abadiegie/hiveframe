@@ -271,7 +271,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../guides/iterative-agent/" class="md-tabs__link">
+        <a href="../../guides/telemetry/" class="md-tabs__link">
           
   
   
@@ -598,6 +598,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -940,6 +968,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../cluster/" class="md-nav__link">
         
   
@@ -1083,14 +1139,17 @@
 <li><code>from_runtime(runtime, data, frame_id=None, transactional=True)</code> — Attach to a cluster runtime</li>
 <li><code>read_fresh()</code> — Get the latest local snapshot</li>
 <li><code>read_fresh_global()</code> — Get merged snapshot from all cluster nodes</li>
+<li><code>await read_fresh_global_async()</code> — Get merged snapshot from all cluster nodes (async)</li>
 <li><code>read_fresh_lazy(chunk_size=1000)</code> — Iterate over local data in chunks</li>
 <li><code>read_fresh_global_lazy(chunk_size=1000)</code> — Iterate over global data in chunks</li>
+<li><code>read_fresh_global_lazy_async(chunk_size=1000)</code> — Iterate over global data in chunks (async)</li>
 <li><code>checkpoint(label=None)</code> — Save a checkpoint</li>
 <li><code>rollback(checkpoint_id)</code> — Restore to a checkpoint</li>
 <li><code>cell_history(col, row_idx)</code> — Get audit trail for a cell</li>
-<li><code>get_metrics()</code> — Get DataFrame and cluster metrics</li>
 <li><code>describe_for_agent()</code> — Build LLM context string</li>
 </ul>
+<p>For runtime observability (logs, agent attempt telemetry, and audit trail patterns), see
+<a href="../../guides/telemetry/">Guides -&gt; Telemetry</a>.</p>
 <p>When <code>transactional=False</code>:
 - writes bypass lock-manager + WAL lifecycle,
 - distributed routing and global reads still work,
@@ -1098,6 +1157,10 @@
 - read-replica sync is not provided,
 - <code>cell_history()</code> returns <code>[]</code>,
 - <code>checkpoint()</code> and <code>rollback()</code> raise <code>RuntimeError</code>.</p>
+<p>Async caveats:
+- <code>read_fresh_global()</code> is sync-only. Inside an active event loop, call <code>await read_fresh_global_async()</code>.
+- <code>read_fresh_global_lazy()</code> is sync-only. Inside an active event loop, use <code>async for ... in read_fresh_global_lazy_async(...)</code>.
+- In cluster mode with <code>transactional=False</code>, global reads come from writer snapshots directly; WAL-backed replica convergence is not available.</p>
 <h2 id="example">Example</h2>
 <pre><code class="language-python">import hiveframe as hf
 

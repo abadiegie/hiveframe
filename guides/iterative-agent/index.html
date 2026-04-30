@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://abadiegie.github.io/hiveframe/guides/iterative-agent/">
       
       
-        <link rel="prev" href="../../agent/relational-writer/">
+        <link rel="prev" href="../telemetry/">
       
       
         <link rel="next" href="../checkpoint/">
@@ -273,7 +273,7 @@
     
     
       <li class="md-tabs__item md-tabs__item--active">
-        <a href="./" class="md-tabs__link">
+        <a href="../telemetry/" class="md-tabs__link">
           
   
   
@@ -603,6 +603,34 @@
 
           </label>
           <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
             
               
                 
@@ -1018,6 +1046,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../api/coordinator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TransactionCoordinator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../api/cluster/" class="md-nav__link">
         
   
@@ -1227,11 +1283,10 @@
 
 <h1 id="iterative-multiframeagent">Iterative MultiFrameAgent</h1>
 <h2 id="overview">Overview</h2>
-<p>By default (<code>max_retries=0</code>), <code>MultiFrameAgent</code> runs a single <strong>query → execute → analyze</strong>
-pass. Activating <code>max_retries &gt; 0</code> enables the <strong>iterative review/retry loop</strong> — the agent
-reviews its own query results, decides if they are sufficient, and retries with corrections
-until it converges or reaches the retry limit.</p>
-<pre><code>max_retries=0  →  query → execute → analyze
+<p><code>MultiFrameAgent</code> query mode always runs a reviewed <strong>query → execute → review → final analysis</strong>
+flow. Increasing <code>max_retries</code> allows additional correction rounds after the first reviewed
+attempt when the verdict is not yet sufficient.</p>
+<pre><code>max_retries=0  →  query → execute → review → final analyze
 max_retries=N  →  (query → execute → review → [retry if needed]) × N+1 → final analyze
 </code></pre>
 <hr />
@@ -1320,6 +1375,8 @@ class ReviewVerdict:
 result.total_llm_calls   # int — total LLM calls (query + review + final)
 result.converged         # bool — True if last verdict was accepted or merge
 result.final_verdict     # str — last verdict status
+result.fallback_reason   # str — why it fell back to sample mode, if it did
+result.attempt_summaries # list[dict] — source, labels, verdict, rewrites per attempt
 </code></pre>
 <h3 id="llm-call-count-formula">LLM call count formula</h3>
 <pre><code>total_llm_calls = (attempts × 2) + 1
@@ -1360,10 +1417,15 @@ async def main() -&gt; None:
     print(f&quot;LLM calls: {result.total_llm_calls}&quot;)
     print(f&quot;Converged: {result.converged}&quot;)
     print(f&quot;Final verdict: {result.final_verdict}&quot;)
+    print(f&quot;Fallback reason: {result.fallback_reason or '-'}&quot;)
 
     # Per-attempt review history
     for i, verdict in enumerate(result.review_history, 1):
         print(f&quot;Attempt {i}: {verdict.status} — {verdict.reason}&quot;)
+
+    # Per-attempt execution telemetry
+    for summary in result.attempt_summaries:
+        print(summary)
 
     # Full markdown report (includes iteration history + chart series)
     print(result.to_markdown())
@@ -1389,6 +1451,10 @@ Produk A memiliki penjualan tertinggi (500 unit) dengan stok tersisa hanya 5 uni
 ## Iteration History
 1. ~ **partial** - Sales data OK, inventory query used wrong column name
 2. ✓ **accepted** - Both datasets available and sufficient
+
+## Attempt Summaries
+- Attempt 1 [generated] | succeeded: sales | failed: inventory | verdict: partial | suggested: inventory
+- Attempt 2 [review_override] | succeeded: inventory | failed: - | verdict: accepted | reason: Both datasets available and sufficient
 </code></pre>
 <hr />
 <h2 id="with-chart-series-output">With Chart Series Output</h2>
@@ -1399,17 +1465,17 @@ Produk A memiliki penjualan tertinggi (500 unit) dengan stok tersisa hanya 5 uni
     max_retries=2,
 )
 
-# Access chart data
+# Access chart-ready data
 df = result.to_dataframe(&quot;sales_vs_stock&quot;)
-fig = result.to_plotly_figure(&quot;sales_vs_stock&quot;, chart_type=&quot;bar&quot;)
-fig.show()
+print(df)
 </code></pre>
-<p>See <a href="../../api/agent/#seriesspec">API Reference → AgentWriter</a> for full SeriesSpec docs.</p>
+<p>See <a href="../../api/agent/#seriesspec">API Reference → AgentWriter</a> for full <code>SeriesSpec</code> docs.</p>
+<p>Hiveframe outputs data, not visualizations. What you do with that data is entirely up to you.</p>
 <hr />
 <h2 id="tips">Tips</h2>
 <ul>
-<li>Start with <code>max_retries=1</code> — covers most real-world cases with one retry</li>
-<li>Use <code>max_retries=0</code> (default) for simple single-frame queries where one pass is enough</li>
+<li>Start with <code>max_retries=0</code> for the lowest-cost reviewed pass</li>
+<li>Increase to <code>max_retries=1</code> when you want one extra correction round</li>
 <li><code>result.total_llm_calls</code> is your cost indicator — monitor it per query type</li>
 <li><code>result.converged=False</code> with <code>final_verdict="unknown"</code> means max retries hit without convergence — consider increasing <code>max_retries</code> or simplifying the instruction</li>
 <li>The agent accumulates results across attempts (<code>partial</code> mode) — earlier successful results are not re-queried</li>
