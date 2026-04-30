@@ -292,6 +292,39 @@ def test_analyze_query_reuses_single_snapshot_per_frame(monkeypatch: pytest.Monk
     assert inventory_reads["count"] == 1
 
 
+def test_snapshot_fresh_frames_is_lazy() -> None:
+    sales = DFrame({"product_id": ["a"], "qty": [1]})
+    inventory = DFrame({"product_id": ["a"], "stock": [3]})
+    agent = MultiFrameAgent(frames={"sales": sales, "inventory": inventory})
+
+    sales_reads = {"count": 0}
+    inventory_reads = {"count": 0}
+    sales_original = sales.read_fresh
+    inventory_original = inventory.read_fresh
+
+    def counted_sales_read_fresh():
+        sales_reads["count"] += 1
+        return sales_original()
+
+    def counted_inventory_read_fresh():
+        inventory_reads["count"] += 1
+        return inventory_original()
+
+    sales.read_fresh = counted_sales_read_fresh  # type: ignore[assignment]
+    inventory.read_fresh = counted_inventory_read_fresh  # type: ignore[assignment]
+
+    snapshots = agent._snapshot_fresh_frames()
+
+    assert sales_reads["count"] == 0
+    assert inventory_reads["count"] == 0
+
+    sales_snapshot = snapshots.get("sales")
+
+    assert sales_snapshot is not None
+    assert sales_reads["count"] == 1
+    assert inventory_reads["count"] == 0
+
+
 def test_analyze_query_executes_generated_queries(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = MultiFrameAgent(frames={"sales": frame_sales})
     calls: list[list[dict[str, str]]] = []

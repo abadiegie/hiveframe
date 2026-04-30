@@ -24,6 +24,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hiveframe.agent.multi")
 
+
+class _LazyFrameSnapshots(dict[str, "pd.DataFrame"]):
+    """Per-analyze lazy cache for fresh frame snapshots."""
+
+    def __init__(self, frames: dict[str, "DFrame"]) -> None:
+        super().__init__()
+        self._frames = frames
+
+    def get(self, key: str, default: "pd.DataFrame | None" = None) -> "pd.DataFrame | None":
+        if key not in self and key in self._frames:
+            self[key] = self._frames[key].read_fresh()
+        return super().get(key, default)
+
 _ALLOWED_PANDAS_METHODS = frozenset(
     {
         "groupby",
@@ -1252,10 +1265,7 @@ class MultiFrameAgent:
         return normalized
 
     def _snapshot_fresh_frames(self) -> dict[str, "pd.DataFrame"]:
-        snapshots: dict[str, "pd.DataFrame"] = {}
-        for label, frame in self._frames.items():
-            snapshots[label] = frame.read_fresh()
-        return snapshots
+        return _LazyFrameSnapshots(self._frames)
 
     async def _write_to_frame(self, operations: list[dict[str, Any]], output_frame: "DFrame") -> dict[str, Any]:
         from .writer import AgentWriter
