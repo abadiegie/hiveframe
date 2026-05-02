@@ -192,6 +192,10 @@ class ChartGenerator:
         y_cols: list[str] = (
             [y] if isinstance(y, str) else list(y) if y else []
         )
+        if len(y_cols) > 1:
+            raise ValueError("Multiple y columns are not supported yet. Pass a single y column.")
+        if top_n is not None and top_n < 0:
+            raise ValueError("top_n must be >= 0 or None")
 
         _builders = {
             "bar": self._bar,
@@ -232,11 +236,6 @@ class ChartGenerator:
         )
 
         y_column = sy[0] if isinstance(sy, list) and sy else (sy or "")
-        if isinstance(sy, list) and len(sy) > 1:
-            logger.debug(
-                "ChartGenerator.generate: multi-y result detected, using first y column '%s'",
-                y_column,
-            )
 
         if sx and sx in result_df.columns:
             x_values = result_df[sx].tolist()
@@ -301,7 +300,7 @@ class ChartGenerator:
         if not y:
             result = df[x].value_counts().reset_index()
             result.columns = [x, "count"]
-            if top_n:
+            if top_n is not None:
                 result = result.head(top_n)
             return result, x, "count", None
 
@@ -316,7 +315,7 @@ class ChartGenerator:
         _sort = sort_by or (y_col if isinstance(y_col, str) else y_col[0])
         if _sort in result.columns:
             result = result.sort_values(_sort, ascending=ascending)
-        if top_n:
+        if top_n is not None:
             result = result.head(top_n)
         return result, x, y_col, group_by
 
@@ -338,8 +337,8 @@ class ChartGenerator:
 
         _sort = sort_by or x
         if _sort in result.columns:
-            result = result.sort_values(_sort, ascending=True)
-        if top_n:
+            result = result.sort_values(_sort, ascending=ascending)
+        if top_n is not None:
             result = result.head(top_n)
         return result, x, y_col, group_by
 
@@ -355,7 +354,7 @@ class ChartGenerator:
             select_cols.append(group_by)
 
         result = df[select_cols].dropna()
-        if top_n:
+        if top_n is not None:
             result = result.head(top_n)
         return result, x, y_col, group_by
 
@@ -368,14 +367,14 @@ class ChartGenerator:
         if not y:
             result = df[x].value_counts().reset_index()
             result.columns = [x, "count"]
-            if top_n:
+            if top_n is not None:
                 result = result.head(top_n)
             return result, x, "count", None
 
         y_col = y[0]
         result = df.groupby(x)[y_col].agg(agg).reset_index()
         result = result.sort_values(y_col, ascending=False)
-        if top_n:
+        if top_n is not None:
             result = result.head(top_n)
         return result, x, y_col, None
 
@@ -390,7 +389,7 @@ class ChartGenerator:
             select_cols.append(group_by)
 
         result = df[select_cols].dropna()
-        if top_n:
+        if top_n is not None:
             result = result.head(top_n)
         return result, x, "", group_by
 
@@ -408,10 +407,14 @@ class ChartGenerator:
                 .size()
                 .reset_index(name="count")
             )
+            if top_n is not None:
+                result = result.head(top_n)
             return result, x, "count", group_by
 
         y_col = y[0]
         result = df.groupby([x, group_by])[y_col].agg(agg).reset_index()
+        if top_n is not None:
+            result = result.head(top_n)
         return result, x, y_col, group_by
 
 

@@ -369,6 +369,28 @@ class RelationalAgentWriter:
                     raw = await asyncio.wait_for(llm_call(messages), timeout=timeout)
                 plan = parse_plan(raw)
                 operations = list(plan.get("operations", []))
+                # Validate operations belong to this chunk's row range
+                chunk_start = i
+                chunk_end = i + len(chunk) - 1
+                valid_operations = []
+                for op in operations:
+                    cell_id = op.get("cell_id", "")
+                    parsed = self._target._parse_cell_id(cell_id)
+                    if parsed is None:
+                        logger.warning(
+                            "Skipping operation with invalid/foreign cell_id '%s' in chunk %d-%d",
+                            cell_id, chunk_start, chunk_end,
+                        )
+                        continue
+                    _, row_idx = parsed
+                    if not (chunk_start <= row_idx <= chunk_end):
+                        logger.warning(
+                            "Skipping out-of-bound operation cell_id='%s' row=%d not in [%d, %d]",
+                            cell_id, row_idx, chunk_start, chunk_end,
+                        )
+                        continue
+                    valid_operations.append(op)
+                operations = valid_operations
                 logger.debug(
                     "relational LLM_PARSED: chunk=%d-%d operations=%d preview=%s",
                     i,

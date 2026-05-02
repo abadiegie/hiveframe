@@ -477,6 +477,17 @@ class MultiFrameAgent:
             provider,
         )
 
+    @staticmethod
+    def _coerce_plan_dict(plan: Any, stage: str) -> dict[str, Any]:
+        if isinstance(plan, dict):
+            return plan
+        logger.warning(
+            "parse_plan returned non-dict at stage '%s': %s; using empty plan",
+            stage,
+            type(plan).__name__,
+        )
+        return {}
+
     async def analyze(
         self,
         instruction: str,
@@ -572,7 +583,7 @@ class MultiFrameAgent:
             mode="sample",
         )
         raw = await self._call_llm(messages)
-        plan = parse_plan(raw)
+        plan = self._coerce_plan_dict(parse_plan(raw), stage="sample_analysis")
         return self._plan_to_result(plan)
 
     async def _analyze_query_mode(
@@ -644,7 +655,7 @@ class MultiFrameAgent:
         )
 
         raw_analysis = await self._call_llm(analysis_messages)
-        analysis_plan = parse_plan(raw_analysis)
+        analysis_plan = self._coerce_plan_dict(parse_plan(raw_analysis), stage="query_simple_analysis")
 
         result = self._plan_to_result(analysis_plan)
         result.queries_executed = executed_queries
@@ -716,7 +727,7 @@ class MultiFrameAgent:
                 raw_queries = await self._call_llm(query_messages)
                 total_llm_calls += 1
 
-                query_plan = parse_plan(raw_queries)
+                query_plan = self._coerce_plan_dict(parse_plan(raw_queries), stage="iterative_query_generation")
                 new_queries = query_plan.get("queries", {})
 
             if isinstance(new_queries, dict):
@@ -834,7 +845,7 @@ class MultiFrameAgent:
             )
             raw_review = await self._call_llm(review_messages)
             total_llm_calls += 1
-            verdict_dict = parse_plan(raw_review)
+            verdict_dict = self._coerce_plan_dict(parse_plan(raw_review), stage="iterative_review")
 
             # Legacy compatibility: older callers/tests may return final analysis JSON
             # directly in the second call without a review verdict payload.
@@ -963,7 +974,7 @@ class MultiFrameAgent:
         )
         raw_analysis = await self._call_llm(final_messages)
         total_llm_calls += 1
-        analysis_plan = parse_plan(raw_analysis)
+        analysis_plan = self._coerce_plan_dict(parse_plan(raw_analysis), stage="iterative_final_analysis")
         result = self._plan_to_result(analysis_plan)
         result.queries_executed = dict(accumulated_queries)
         result.query_errors = dict(accumulated_errors)

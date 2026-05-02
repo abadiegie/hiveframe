@@ -189,6 +189,15 @@ class ReadNode:
                     pdf[col] = pd.Series([None] * len(pdf.index), dtype="object")
             updates_df = pd.DataFrame({col: pd.Series(mapping) for col, mapping in col_updates.items()})
             updates_df = updates_df.reindex(range(len(pdf.index)))
-            pdf.update(updates_df)
+            # pdf.update() silently skips NaN — use mask to allow explicit null writes
+            for col in updates_df.columns:
+                written_mask = updates_df[col].notna()
+                null_mask = ~written_mask & updates_df[col].index.isin(
+                    [idx for idx, v in col_updates.get(col, {}).items() if v is None]
+                )
+                if written_mask.any():
+                    pdf.loc[written_mask[written_mask].index, col] = updates_df.loc[written_mask, col]
+                if null_mask.any():
+                    pdf.loc[null_mask[null_mask].index, col] = None
             self._cache = pdf
             self._version = max(self._version, max_version)

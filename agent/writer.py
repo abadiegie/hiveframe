@@ -9,8 +9,14 @@ import asyncio
 import logging
 from typing import Any, Callable, Awaitable, Optional
 
-from core.coordinator import TransactionCoordinator
-from core.transaction import Operation, TxState
+try:
+    # Source-layout import (tests/local dev)
+    from core.coordinator import TransactionCoordinator
+    from core.transaction import Operation, TxState
+except ModuleNotFoundError:  # pragma: no cover - exercised in packaged installs
+    # Installed package import (hiveframe.core)
+    from hiveframe.core.coordinator import TransactionCoordinator
+    from hiveframe.core.transaction import Operation, TxState
 from ._llm_debug import summarize_messages, summarize_operations
 
 
@@ -282,12 +288,29 @@ class AgentWriter:
                 custom_instruction="Standardize to proper Indonesian city names",
             )
         """
-        df = self._coordinator.write_node._df
-        # Find the internal namespaced column from the public column name.
-        col_candidates = [c for c in df.columns if c.endswith(f"::{column}") or c == column]
-        if not col_candidates:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+
+        # Build frame-local snapshot to avoid cross-frame leakage when a coordinator
+        # owns multiple DFrames.
+        wn = self._coordinator.write_node
+        with wn._lock:
+            df_internal = wn._df
+            if self._frame_id is None:
+                df = df_internal.copy()
+            else:
+                prefix = f"{self._frame_id}::"
+                matching_cols = [c for c in df_internal.columns if c.startswith(prefix)]
+                if matching_cols:
+                    df = df_internal[matching_cols].copy()
+                    df.columns = [c[len(prefix):] for c in matching_cols]
+                else:
+                    df = df_internal.iloc[0:0].copy()
+
+        df = df.reset_index(drop=True)
+
+        if column not in df.columns:
             raise ValueError(f"Column '{column}' not found in DataFrame")
-        col_name = col_candidates[0]
         total = len(df)
         written = 0
         skipped = 0

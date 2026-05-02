@@ -1098,6 +1098,17 @@ class DFrame:
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
         snapshot = self._checkpoints[checkpoint_id]["snapshot"]
+
+        # Clear all existing columns for this frame namespace before restoring
+        prefix = f"{self._frame_id}{self._SEP}"
+        wn = self._coordinator.write_node
+        with wn._lock:
+            cols_to_drop = [c for c in wn._df.columns if c.startswith(prefix)]
+            if cols_to_drop:
+                wn._df = wn._df.drop(columns=cols_to_drop)
+            wn._version += 1
+
+        self._invalidate_snapshot_cache()
         self._seed_initial_data(snapshot)
 
     def list_checkpoints(self) -> list[dict]:
