@@ -81,6 +81,12 @@ def test_bar_top_n(gen):
     assert len(series.x) == 2
 
 
+def test_bar_top_n_zero_returns_empty(gen):
+    series = gen.generate("bar", x="Category", top_n=0)
+    assert len(series.x) == 0
+    assert len(series.y) == 0
+
+
 # -- generate: line / area --------------------------------------------
 
 def test_line(gen):
@@ -88,6 +94,11 @@ def test_line(gen):
     assert series.x_label == "Category"
     assert series.y_label == "Revenue"
     assert series.series_type == "line"
+
+
+def test_line_respects_ascending(gen):
+    series = gen.generate("line", x="Category", y="Revenue", agg="sum", ascending=False)
+    assert series.x == ["C", "B", "A"]
 
 
 def test_area(gen):
@@ -170,6 +181,11 @@ def test_unknown_chart_type_raises(gen):
 def test_unknown_agg_raises(gen):
     with pytest.raises(ValueError, match="Unsupported agg"):
         gen.generate("bar", x="Category", y="Revenue", agg="variance")
+
+
+def test_multi_y_raises(gen):
+    with pytest.raises(ValueError, match="Multiple y columns"):
+        gen.generate("bar", x="Category", y=["Revenue", "Count"], agg="sum")
 
 
 def test_missing_column_raises(gen):

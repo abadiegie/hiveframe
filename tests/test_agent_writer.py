@@ -3,8 +3,10 @@
 
 import asyncio
 import logging
+import pytest
 
 from agent.writer import AgentWriter
+from core.coordinator import TransactionCoordinator
 from core.dataframe import DFrame
 
 
@@ -192,5 +194,52 @@ def test_batch_enrich_mixed_confidence_writes_only_above_threshold() -> None:
     assert result["skipped"] == 1
     assert fresh.at[0, "city"] == "DKI Jakarta"
     assert fresh.at[1, "city"] == "bandung"
+
+
+def test_stream_normalize_invalid_chunk_size_raises() -> None:
+    df = DFrame({"city": ["jakarta"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    async def fake_llm_call(_messages):
+        return []
+
+    with pytest.raises(ValueError, match="chunk_size must be > 0"):
+        asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=0))
+
+
+def test_stream_normalize_uses_only_target_frame_columns(monkeypatch) -> None:
+    coordinator = TransactionCoordinator()
+    target = DFrame({"city": ["jakarta", "bandung"]}, coordinator=coordinator)
+    _other = DFrame({"country": ["ID", "ID"]}, coordinator=coordinator)
+
+    writer = AgentWriter(
+        coordinator=coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=target._frame_id,
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def fake_llm_call(messages):
+        captured_messages.append(messages)
+        return []
+
+    async def fake_batch_enrich(items):
+        return {"written": 0, "skipped": len(items)}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    result = asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=2))
+
+    assert result["total"] == 2
+    assert captured_messages
+    blob = "\n".join(msg["content"] for msg in captured_messages[0] if isinstance(msg, dict))
+    assert "country" not in blob
 
 

@@ -379,6 +379,39 @@ def test_analyze_query_simple_fallback_sets_reason(frame_sales: DFrame, monkeypa
     assert result.attempt_summaries
 
 
+def test_analyze_sample_non_dict_plan_is_handled(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+
+    async def fake_call(_messages: list[dict[str, str]]) -> str:
+        return "null"
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("x", mode="sample"))
+
+    assert isinstance(result, MultiFrameResult)
+    assert result.analysis == ""
+
+
+def test_analyze_query_simple_non_dict_analysis_plan_is_handled(
+    frame_sales: DFrame,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = MultiFrameAgent(frames={"sales": frame_sales})
+    responses = [
+        "```python\n# frame: sales\nresult = df.head(1)\n```",
+        "null",
+    ]
+
+    async def fake_call(_messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent._analyze_query_mode_simple("x", max_result_rows=200))
+
+    assert isinstance(result, MultiFrameResult)
+    assert "sales" in result.queries_executed
+
+
 def test_analyze_query_self_heals_frame_label_variable(
     frame_sales: DFrame,
     monkeypatch: pytest.MonkeyPatch,
