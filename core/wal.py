@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 import os
+from urllib.parse import urlparse
 from typing import Any
 import json
 import logging
@@ -270,12 +271,184 @@ class RedisWriteAheadLog:
             return history
 
 
-def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog:
+class MySQLWriteAheadLog:
+    """MySQL-backed WAL using AUTO_INCREMENT LSN ordering.
+
+    This backend is optional and intended for multi-instance deployments where
+    a shared SQL store is preferred over Redis.
+    """
+
+    def __init__(
+        self,
+        mysql_dsn: str,
+        table_name: str = "hiveframe_wal",
+        mysql_conn: Any | None = None,
+    ) -> None:
+        self._lock = Lock()
+        self._table = table_name
+
+        if mysql_conn is not None:
+            self._conn = mysql_conn
+        else:
+            try:
+                import pymysql
+            except ImportError as exc:
+                raise ImportError(
+                    "pymysql package required for MySQLWriteAheadLog: pip install hiveframe[mysql]"
+                ) from exc
+            params = self._parse_mysql_dsn(mysql_dsn)
+            self._conn = pymysql.connect(autocommit=True, **params)
+
+        self._ensure_table()
+        logger.info("MySQLWriteAheadLog initialized table=%s", self._table)
+
+    @staticmethod
+    def _parse_mysql_dsn(dsn: str) -> dict[str, Any]:
+        parsed = urlparse(dsn)
+        if parsed.scheme not in {"mysql", "mysql+pymysql"}:
+            raise ValueError("mysql dsn must use mysql:// or mysql+pymysql://")
+        database = parsed.path.lstrip("/")
+        if not database:
+            raise ValueError("mysql dsn must include database name")
+        return {
+            "host": parsed.hostname or "127.0.0.1",
+            "port": parsed.port or 3306,
+            "user": parsed.username,
+            "password": parsed.password,
+            "database": database,
+            "charset": "utf8mb4",
+        }
+
+    def _ensure_table(self) -> None:
+        sql = (
+            f"CREATE TABLE IF NOT EXISTS {self._table} ("
+            "lsn BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+            "tx_id VARCHAR(128) NOT NULL,"
+            "state VARCHAR(32) NOT NULL,"
+            "ts VARCHAR(64) NOT NULL,"
+            "operations_json LONGTEXT NOT NULL"
+            ") ENGINE=InnoDB"
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+
+    def append(self, transaction: Transaction) -> int:
+        with self._lock:
+            entry_ts = datetime.now(timezone.utc).isoformat()
+            operations_json = json.dumps([op.to_dict() for op in transaction.operations], separators=(",", ":"), sort_keys=True)
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    (
+                        f"INSERT INTO {self._table} (tx_id, state, ts, operations_json) "
+                        "VALUES (%s, %s, %s, %s)"
+                    ),
+                    (transaction.tx_id, transaction.state.value, entry_ts, operations_json),
+                )
+                lsn = int(getattr(cur, "lastrowid", 0) or 0)
+            logger.info(
+                "MySQLWAL.append lsn=%s tx_id=%s state=%s ops=%d",
+                lsn,
+                transaction.tx_id,
+                transaction.state.value,
+                len(transaction.operations),
+            )
+            return lsn
+
+    @staticmethod
+    def _row_to_entry(row: tuple[Any, ...]) -> dict[str, Any]:
+        lsn, tx_id, state, ts, operations_json = row
+        try:
+            operations = json.loads(operations_json)
+        except (json.JSONDecodeError, TypeError):
+            operations = []
+        return {
+            "lsn": int(lsn),
+            "tx_id": str(tx_id),
+            "operations": operations,
+            "timestamp": str(ts),
+            "state": str(state),
+        }
+
+    def get_since(self, lsn: int) -> list[dict[str, Any]]:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    (
+                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} "
+                        "WHERE lsn > %s ORDER BY lsn ASC"
+                    ),
+                    (int(lsn),),
+                )
+                rows = list(cur.fetchall())
+            return [self._row_to_entry(row) for row in rows]
+
+    def get_committed(self) -> list[dict[str, Any]]:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    (
+                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} "
+                        "WHERE state IN (%s, %s) ORDER BY lsn ASC"
+                    ),
+                    (TxState.COMMITTED.value, TxState.SYNCED.value),
+                )
+                rows = list(cur.fetchall())
+            return [self._row_to_entry(row) for row in rows]
+
+    def compact(self, keep_last_n: int = 1000) -> int:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(f"SELECT lsn FROM {self._table} ORDER BY lsn ASC")
+                lsns = [int(row[0]) for row in cur.fetchall()]
+                if len(lsns) <= keep_last_n:
+                    return 0
+                threshold = lsns[-keep_last_n]
+                cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (threshold,))
+                removed = int(getattr(cur, "rowcount", 0))
+            logger.info("MySQLWAL.compact: removed %d entries, kept %d", removed, keep_last_n)
+            return removed
+
+    def compact_before_lsn(self, lsn: int) -> int:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (int(lsn),))
+                removed = int(getattr(cur, "rowcount", 0))
+            logger.info("MySQLWAL.compact_before_lsn: removed %d entries before lsn %d", removed, lsn)
+            return removed
+
+    def get_cell_history(self, cell_id: str) -> list[dict]:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} ORDER BY lsn ASC")
+                rows = list(cur.fetchall())
+
+            history = []
+            for row in rows:
+                entry = self._row_to_entry(row)
+                for op in entry.get("operations", []):
+                    if op.get("cell_id") == cell_id:
+                        history.append(
+                            {
+                                "lsn": entry.get("lsn"),
+                                "timestamp": entry.get("timestamp"),
+                                "tx_id": entry.get("tx_id"),
+                                "old_value": op.get("old_value"),
+                                "new_value": op.get("new_value"),
+                                "author_type": op.get("author_type"),
+                                "author_id": op.get("author_id"),
+                                "confidence": op.get("confidence"),
+                            }
+                        )
+            return history
+
+
+def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAheadLog:
     """Create WAL backend based on environment configuration.
 
     - HIVEFRAME_WAL_BACKEND=memory (default) -> WriteAheadLog()
     - HIVEFRAME_WAL_BACKEND=file -> WriteAheadLog(wal_path=...)
     - HIVEFRAME_WAL_BACKEND=redis -> RedisWriteAheadLog(...)
+    - HIVEFRAME_WAL_BACKEND=mysql -> MySQLWriteAheadLog(...)
     """
 
     backend = os.getenv("HIVEFRAME_WAL_BACKEND", "memory").strip().lower()
@@ -288,7 +461,11 @@ def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog:
         redis_url = os.getenv("HIVEFRAME_REDIS_URL", "redis://127.0.0.1:6379/0")
         redis_prefix = os.getenv("HIVEFRAME_WAL_REDIS_PREFIX", "hiveframe:wal")
         return RedisWriteAheadLog(redis_url=redis_url, prefix=redis_prefix)
+    if backend == "mysql":
+        mysql_dsn = os.getenv("HIVEFRAME_MYSQL_DSN", "mysql://root@127.0.0.1:3306/hiveframe")
+        mysql_table = os.getenv("HIVEFRAME_WAL_MYSQL_TABLE", "hiveframe_wal")
+        return MySQLWriteAheadLog(mysql_dsn=mysql_dsn, table_name=mysql_table)
     raise ValueError(
-        f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis."
+        f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis|mysql."
     )
 
