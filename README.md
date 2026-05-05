@@ -152,7 +152,9 @@ pip install hiveframe[excel]      # Excel import/export (openpyxl)
 pip install hiveframe[nats]       # NATS registry backend
 pip install hiveframe[quic]       # QUIC transport
 pip install hiveframe[redis]      # Redis-backed WAL backend (optional, multi-user)
+pip install hiveframe[mysql]      # MySQL-backed WAL backend (optional, multi-user)
 pip install hiveframe[transport]  # NATS + QUIC
+pip install hiveframe[all]        # All optional dependencies
 ```
 
 ---

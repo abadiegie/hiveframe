@@ -56,10 +56,16 @@ excel = [
 redis = [
     "redis>=5.0",
 ]
+mysql = [
+    "pymysql>=1.1",
+]
 all = [
     "openpyxl>=3.1",
     "nats-py>=2.7",
+    "aioquic>=1.2",
     "redis>=5.0",
+    "pymysql>=1.1",
+    "psutil>=5.9",
 ]
 
 [tool.pytest.ini_options]
