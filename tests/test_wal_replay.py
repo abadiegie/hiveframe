@@ -7,7 +7,7 @@ import json
 from core.cluster_runtime import ClusterRuntime, RuntimeConfig
 from core.coordinator import TransactionCoordinator
 from core.transaction import Operation
-from core.wal import RedisWriteAheadLog
+from core.wal import MySQLWriteAheadLog, RedisWriteAheadLog
 
 
 class _FakeRedis:
@@ -65,6 +65,23 @@ class _FakeRedis:
         removed = len(bucket) - len(kept)
         self.zsets[key] = kept
         return removed
+
+
+class _NoopMySQLCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _ = (exc_type, exc, tb)
+        return False
+
+    def execute(self, _sql: str, _params=None) -> int:
+        return 0
+
+
+class _NoopMySQLConn:
+    def cursor(self):
+        return _NoopMySQLCursor()
 
 
 def test_replay_applies_remote_commits(monkeypatch) -> None:
@@ -205,5 +222,15 @@ def test_runtime_sets_node_scoped_default_replay_cursor_path(monkeypatch) -> Non
     runtime = ClusterRuntime(RuntimeConfig(node_id="node-a", role="write"))
     assert runtime.coordinator._wal_replay_cursor_path is not None
     assert str(runtime.coordinator._wal_replay_cursor_path).endswith("wal_replay_cursor_node-a.json")
+
+
+def test_replay_enabled_by_default_for_mysql_wal(monkeypatch) -> None:
+    monkeypatch.delenv("HIVEFRAME_WAL_REPLAY_ENABLED", raising=False)
+    wal = MySQLWriteAheadLog(
+        mysql_dsn="mysql://u:p@localhost:3306/db",
+        mysql_conn=_NoopMySQLConn(),
+    )
+    coordinator = TransactionCoordinator(wal=wal)
+    assert coordinator._wal_replay_enabled is True
 
 

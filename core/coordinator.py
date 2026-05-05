@@ -75,7 +75,10 @@ class TransactionCoordinator:
         self._wal_replay_pending_since_save = 0
         replay_env = os.getenv("HIVEFRAME_WAL_REPLAY_ENABLED")
         if replay_env is None:
-            self._wal_replay_enabled = self.wal.__class__.__name__ == "RedisWriteAheadLog"
+            self._wal_replay_enabled = self.wal.__class__.__name__ in {
+                "RedisWriteAheadLog",
+                "MySQLWriteAheadLog",
+            }
         else:
             self._wal_replay_enabled = replay_env.strip().lower() in {"1", "true", "yes", "on"}
 
