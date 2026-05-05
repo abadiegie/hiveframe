@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
+import os
 from typing import Any
 import json
 import logging
@@ -144,3 +145,150 @@ class WriteAheadLog:
                             "confidence": op.get("confidence"),
                         })
             return history
+
+
+class RedisWriteAheadLog:
+    """Redis-backed WAL with global INCR LSN ordering.
+
+    This is a staged backend for multi-instance consistency: Redis stores the
+    authoritative WAL sequence while local write/read nodes remain materialized
+    state for fast access.
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        prefix: str = "hiveframe:wal",
+        redis_client: Any | None = None,
+    ) -> None:
+        self._lock = Lock()
+        self._prefix = prefix
+        self._lsn_key = f"{prefix}:lsn"
+        self._entries_key = f"{prefix}:entries"
+
+        if redis_client is not None:
+            self._redis = redis_client
+        else:
+            try:
+                import redis
+            except ImportError as exc:
+                raise ImportError(
+                    "redis package required for RedisWriteAheadLog: pip install hiveframe[redis]"
+                ) from exc
+            self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
+
+        logger.info("RedisWriteAheadLog initialized prefix=%s", self._prefix)
+
+    def _entry_from_tx(self, lsn: int, transaction: Transaction) -> dict[str, Any]:
+        return {
+            "lsn": lsn,
+            "tx_id": transaction.tx_id,
+            "operations": [op.to_dict() for op in transaction.operations],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "state": transaction.state.value,
+        }
+
+    def _decode_entries(self, raw_entries: list[str]) -> list[dict[str, Any]]:
+        decoded: list[dict[str, Any]] = []
+        for raw in raw_entries:
+            try:
+                decoded.append(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Redis WAL decode failure; skipping malformed entry")
+        return decoded
+
+    def append(self, transaction: Transaction) -> int:
+        with self._lock:
+            lsn = int(self._redis.incr(self._lsn_key))
+            entry = self._entry_from_tx(lsn, transaction)
+            payload = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+            self._redis.zadd(self._entries_key, {payload: lsn})
+            logger.info(
+                "RedisWAL.append lsn=%s tx_id=%s state=%s ops=%d",
+                lsn,
+                transaction.tx_id,
+                transaction.state.value,
+                len(entry["operations"]),
+            )
+            return lsn
+
+    def get_since(self, lsn: int) -> list[dict[str, Any]]:
+        with self._lock:
+            raw = self._redis.zrangebyscore(self._entries_key, f"({lsn}", "+inf")
+            results = self._decode_entries(raw)
+            logger.debug("RedisWAL.get_since lsn=%s results=%d", lsn, len(results))
+            return results
+
+    def get_committed(self) -> list[dict[str, Any]]:
+        with self._lock:
+            raw = self._redis.zrange(self._entries_key, 0, -1)
+            entries = self._decode_entries(raw)
+            results = [
+                entry
+                for entry in entries
+                if entry.get("state") in {TxState.COMMITTED.value, TxState.SYNCED.value}
+            ]
+            logger.debug("RedisWAL.get_committed count=%d", len(results))
+            return results
+
+    def compact(self, keep_last_n: int = 1000) -> int:
+        with self._lock:
+            size = int(self._redis.zcard(self._entries_key))
+            if size <= keep_last_n:
+                return 0
+            remove_count = size - keep_last_n
+            self._redis.zremrangebyrank(self._entries_key, 0, remove_count - 1)
+            logger.info("RedisWAL.compact: removed %d entries, kept %d", remove_count, keep_last_n)
+            return remove_count
+
+    def compact_before_lsn(self, lsn: int) -> int:
+        with self._lock:
+            removed = int(self._redis.zremrangebyscore(self._entries_key, "-inf", lsn - 1))
+            logger.info("RedisWAL.compact_before_lsn: removed %d entries before lsn %d", removed, lsn)
+            return removed
+
+    def get_cell_history(self, cell_id: str) -> list[dict]:
+        with self._lock:
+            raw = self._redis.zrange(self._entries_key, 0, -1)
+            entries = self._decode_entries(raw)
+            history = []
+            for entry in entries:
+                for op in entry.get("operations", []):
+                    if op.get("cell_id") == cell_id:
+                        history.append(
+                            {
+                                "lsn": entry.get("lsn"),
+                                "timestamp": entry.get("timestamp"),
+                                "tx_id": entry.get("tx_id"),
+                                "old_value": op.get("old_value"),
+                                "new_value": op.get("new_value"),
+                                "author_type": op.get("author_type"),
+                                "author_id": op.get("author_id"),
+                                "confidence": op.get("confidence"),
+                            }
+                        )
+            return history
+
+
+def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog:
+    """Create WAL backend based on environment configuration.
+
+    - HIVEFRAME_WAL_BACKEND=memory (default) -> WriteAheadLog()
+    - HIVEFRAME_WAL_BACKEND=file -> WriteAheadLog(wal_path=...)
+    - HIVEFRAME_WAL_BACKEND=redis -> RedisWriteAheadLog(...)
+    """
+
+    backend = os.getenv("HIVEFRAME_WAL_BACKEND", "memory").strip().lower()
+    if backend == "memory":
+        return WriteAheadLog()
+    if backend == "file":
+        wal_path = os.getenv("HIVEFRAME_WAL_PATH")
+        return WriteAheadLog(wal_path=wal_path)
+    if backend == "redis":
+        redis_url = os.getenv("HIVEFRAME_REDIS_URL", "redis://127.0.0.1:6379/0")
+        redis_prefix = os.getenv("HIVEFRAME_WAL_REDIS_PREFIX", "hiveframe:wal")
+        return RedisWriteAheadLog(redis_url=redis_url, prefix=redis_prefix)
+    raise ValueError(
+        f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis."
+    )
+

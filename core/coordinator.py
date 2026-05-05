@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 import logging
+import os
 import time
+from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from .lock_manager import CellLockManager
 from .read_node import ReadNode
 from .transaction import InvalidTransitionError, Operation, Transaction, TxState
-from .wal import WriteAheadLog
+from .wal import WriteAheadLog, create_default_wal
 from .write_node import WriteNode
 
 if TYPE_CHECKING:
@@ -55,11 +58,26 @@ class TransactionCoordinator:
         self.write_node = write_node or WriteNode()
         self.read_node = read_node or ReadNode()
         self.lock_manager = lock_manager or CellLockManager()
-        self.wal = wal or WriteAheadLog()
+        self.wal = wal or create_default_wal()
         self.replication_manager = replication_manager
         self.stats = CoordinatorStats()
         self._stats_lock = Lock()
         self.write_node.set_delta_callback(self.read_node.receive_delta)
+        self._wal_replay_task: asyncio.Task[None] | None = None
+        self._wal_replay_stop: asyncio.Event | None = None
+        self._wal_replay_last_lsn = 0
+        self._wal_replay_interval_s = max(0.01, float(os.getenv("HIVEFRAME_WAL_REPLAY_INTERVAL_S", "0.1")))
+        self._wal_replay_cursor_path: Path | None = None
+        cursor_path_raw = os.getenv("HIVEFRAME_WAL_REPLAY_CURSOR_PATH", "").strip()
+        if cursor_path_raw:
+            self._wal_replay_cursor_path = Path(cursor_path_raw)
+        self._wal_replay_save_every = max(1, int(os.getenv("HIVEFRAME_WAL_REPLAY_SAVE_EVERY", "1")))
+        self._wal_replay_pending_since_save = 0
+        replay_env = os.getenv("HIVEFRAME_WAL_REPLAY_ENABLED")
+        if replay_env is None:
+            self._wal_replay_enabled = self.wal.__class__.__name__ == "RedisWriteAheadLog"
+        else:
+            self._wal_replay_enabled = replay_env.strip().lower() in {"1", "true", "yes", "on"}
 
         logger.info("TransactionCoordinator initialized write_node=%s read_node=%s", getattr(self.write_node, 'node_id', 'local'), getattr(self.read_node, 'node_id', 'local'))
 
@@ -92,6 +110,7 @@ class TransactionCoordinator:
 
             tx.transition(TxState.COMMITTED)
             lsn = self.wal.append(tx)
+            self._advance_wal_replay_cursor(int(lsn), persist=True)
             logger.info("Transaction committed tx_id=%s lsn=%s", tx.tx_id, lsn)
             tx.transition(TxState.SYNCING)
 
@@ -115,7 +134,8 @@ class TransactionCoordinator:
                 tx.fail()
             except InvalidTransitionError:
                 pass
-            self.wal.append(tx)
+            failed_lsn = self.wal.append(tx)
+            self._advance_wal_replay_cursor(int(failed_lsn), persist=True)
             with self._stats_lock:
                 self.stats.failed_count += 1
             return tx
@@ -171,4 +191,125 @@ class TransactionCoordinator:
             # No running event loop (sync context); best-effort via new thread loop.
             logger.debug("No running loop to schedule replication for lsn=%s; skipping background schedule", lsn)
             pass
+
+    async def start_wal_replay(self) -> None:
+        """Start background replay from shared WAL into local materialized state."""
+        if not self._wal_replay_enabled:
+            return
+        if self._wal_replay_task is not None and not self._wal_replay_task.done():
+            return
+        self._load_wal_replay_checkpoint()
+        self._wal_replay_stop = asyncio.Event()
+        self._wal_replay_task = asyncio.create_task(self._wal_replay_loop())
+        logger.info("WAL replay loop started interval=%.3fs", self._wal_replay_interval_s)
+
+    async def stop_wal_replay(self) -> None:
+        """Stop background WAL replay task if running."""
+        if self._wal_replay_stop is not None:
+            self._wal_replay_stop.set()
+        if self._wal_replay_task is not None:
+            await self._wal_replay_task
+        self._save_wal_replay_checkpoint(force=True)
+        self._wal_replay_task = None
+        self._wal_replay_stop = None
+
+    async def _wal_replay_loop(self) -> None:
+        while self._wal_replay_stop is not None and not self._wal_replay_stop.is_set():
+            try:
+                entries = list(self.wal.get_since(self._wal_replay_last_lsn))
+                entries.sort(key=lambda item: int(item.get("lsn", 0)))
+                for entry in entries:
+                    lsn = int(entry.get("lsn", 0))
+                    if lsn <= self._wal_replay_last_lsn:
+                        continue
+                    state = str(entry.get("state", ""))
+                    if state in {TxState.COMMITTED.value, TxState.SYNCED.value}:
+                        self._apply_wal_entry(entry)
+                    self._advance_wal_replay_cursor(lsn, persist=False)
+            except Exception as exc:
+                logger.warning("WAL replay iteration failed: %s", exc)
+
+            try:
+                stop_event = self._wal_replay_stop
+                if stop_event is None:
+                    break
+                await asyncio.wait_for(stop_event.wait(), timeout=self._wal_replay_interval_s)
+            except asyncio.TimeoutError:
+                continue
+
+    def set_wal_replay_cursor_path(self, path: str | None) -> None:
+        """Override replay cursor checkpoint path for this coordinator instance."""
+        self._wal_replay_cursor_path = Path(path) if path else None
+
+    def _advance_wal_replay_cursor(self, lsn: int, *, persist: bool) -> None:
+        if lsn <= self._wal_replay_last_lsn:
+            return
+        self._wal_replay_last_lsn = lsn
+        self._wal_replay_pending_since_save += 1
+        self._save_wal_replay_checkpoint(force=persist)
+
+    def _load_wal_replay_checkpoint(self) -> None:
+        if self._wal_replay_cursor_path is None:
+            return
+        try:
+            if not self._wal_replay_cursor_path.exists():
+                return
+            payload = json.loads(self._wal_replay_cursor_path.read_text())
+            loaded_lsn = int(payload.get("last_lsn", 0))
+            self._wal_replay_last_lsn = max(self._wal_replay_last_lsn, loaded_lsn)
+            logger.info(
+                "Loaded WAL replay cursor last_lsn=%d from %s",
+                self._wal_replay_last_lsn,
+                self._wal_replay_cursor_path,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load WAL replay cursor from %s: %s", self._wal_replay_cursor_path, exc)
+
+    def _save_wal_replay_checkpoint(self, *, force: bool = False) -> None:
+        if self._wal_replay_cursor_path is None:
+            return
+        if not force and self._wal_replay_pending_since_save < self._wal_replay_save_every:
+            return
+        try:
+            self._wal_replay_cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._wal_replay_cursor_path.with_suffix(self._wal_replay_cursor_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps({"last_lsn": self._wal_replay_last_lsn}, sort_keys=True))
+            tmp_path.replace(self._wal_replay_cursor_path)
+            self._wal_replay_pending_since_save = 0
+        except Exception as exc:
+            logger.warning("Failed to save WAL replay cursor to %s: %s", self._wal_replay_cursor_path, exc)
+
+    def _apply_wal_entry(self, entry: dict[str, Any]) -> None:
+        raw_ops = list(entry.get("operations", []))
+        if not raw_ops:
+            return
+
+        ops: list[Operation] = []
+        for raw in raw_ops:
+            cell_id = str(raw.get("cell_id", ""))
+            if not cell_id:
+                continue
+            current = self.write_node.get(cell_id)
+            next_value = raw.get("new_value")
+            # Idempotence: skip no-op writes to avoid unnecessary version churn.
+            if current == next_value:
+                continue
+            ops.append(
+                Operation(
+                    cell_id=cell_id,
+                    old_value=current,
+                    new_value=next_value,
+                    author_type=str(raw.get("author_type", "replica")),
+                    author_id=raw.get("author_id"),
+                    confidence=raw.get("confidence"),
+                )
+            )
+
+        if not ops:
+            return
+
+        tx = Transaction(operations=ops, tx_id=str(entry.get("tx_id", "replay")))
+        applied = self.write_node.apply(tx)
+        if not applied:
+            logger.warning("WAL replay apply failed tx_id=%s ops=%d", tx.tx_id, len(ops))
 

@@ -41,6 +41,7 @@ class RuntimeConfig:
     registry_backend: str = "memory"  # memory | nats | sqlite
     transport_backend: str = "memory"  # memory | quic | tcp
     required_cluster: bool = False
+    wal_replay_cursor_path: str | None = None
 
 
 class ClusterRuntime:
@@ -49,6 +50,16 @@ class ClusterRuntime:
     def __init__(self, config: RuntimeConfig, coordinator: TransactionCoordinator | None = None) -> None:
         self.config = config
         self.coordinator = coordinator or TransactionCoordinator()
+        if config.wal_replay_cursor_path:
+            self.coordinator.set_wal_replay_cursor_path(config.wal_replay_cursor_path)
+        elif (
+            self.coordinator._wal_replay_enabled
+            and self.coordinator._wal_replay_cursor_path is None
+        ):
+            # Node-scoped default avoids cursor collisions across instances on one host.
+            self.coordinator.set_wal_replay_cursor_path(
+                f".hiveframe/wal_replay_cursor_{config.node_id}.json"
+            )
 
         # Registry selection
         if config.registry_backend == "sqlite":
@@ -155,6 +166,7 @@ class ClusterRuntime:
         await self.registry.register(node_info)
         logger.info("Node registered: %s (role=%s host=%s port=%s)", node_info.node_id, node_info.role, node_info.host, node_info.port)
         await self._refresh_transport_peers()
+        await self.coordinator.start_wal_replay()
 
     async def _refresh_transport_peers(self) -> None:
         """Seed transport peer map from registry entries when transport supports it."""

@@ -53,9 +53,13 @@ benchmark = [
 excel = [
     "openpyxl>=3.1",
 ]
+redis = [
+    "redis>=5.0",
+]
 all = [
     "openpyxl>=3.1",
     "nats-py>=2.7",
+    "redis>=5.0",
 ]
 
 [tool.pytest.ini_options]
