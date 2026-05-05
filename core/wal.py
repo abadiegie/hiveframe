@@ -283,6 +283,7 @@ class MySQLWriteAheadLog:
         mysql_dsn: str,
         table_name: str = "hiveframe_wal",
         mysql_conn: Any | None = None,
+        auto_create_db: bool = False,
     ) -> None:
         self._lock = Lock()
         self._table = table_name
@@ -296,6 +297,8 @@ class MySQLWriteAheadLog:
                 raise ImportError(
                     "pymysql package required for MySQLWriteAheadLog: pip install hiveframe[mysql]"
                 ) from exc
+            if auto_create_db:
+                self._ensure_database(pymysql, mysql_dsn)
             params = self._parse_mysql_dsn(mysql_dsn)
             self._conn = pymysql.connect(autocommit=True, **params)
 
@@ -303,21 +306,41 @@ class MySQLWriteAheadLog:
         logger.info("MySQLWriteAheadLog initialized table=%s", self._table)
 
     @staticmethod
-    def _parse_mysql_dsn(dsn: str) -> dict[str, Any]:
+    def _parse_mysql_dsn(dsn: str, include_database: bool = True) -> dict[str, Any]:
         parsed = urlparse(dsn)
         if parsed.scheme not in {"mysql", "mysql+pymysql"}:
             raise ValueError("mysql dsn must use mysql:// or mysql+pymysql://")
         database = parsed.path.lstrip("/")
         if not database:
             raise ValueError("mysql dsn must include database name")
-        return {
+        params = {
             "host": parsed.hostname or "127.0.0.1",
             "port": parsed.port or 3306,
             "user": parsed.username,
             "password": parsed.password,
-            "database": database,
             "charset": "utf8mb4",
         }
+        if include_database:
+            params["database"] = database
+        return params
+
+    @staticmethod
+    def _quote_mysql_identifier(name: str) -> str:
+        return f"`{name.replace('`', '``')}`"
+
+    def _ensure_database(self, pymysql_module: Any, dsn: str) -> None:
+        params = self._parse_mysql_dsn(dsn)
+        database = str(params["database"])
+        bootstrap_params = self._parse_mysql_dsn(dsn, include_database=False)
+        conn = pymysql_module.connect(autocommit=True, **bootstrap_params)
+        try:
+            sql = f"CREATE DATABASE IF NOT EXISTS {self._quote_mysql_identifier(database)}"
+            with conn.cursor() as cur:
+                cur.execute(sql)
+        finally:
+            close = getattr(conn, "close", None)
+            if callable(close):
+                close()
 
     def _ensure_table(self) -> None:
         sql = (
@@ -464,7 +487,17 @@ def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAhead
     if backend == "mysql":
         mysql_dsn = os.getenv("HIVEFRAME_MYSQL_DSN", "mysql://root@127.0.0.1:3306/hiveframe")
         mysql_table = os.getenv("HIVEFRAME_WAL_MYSQL_TABLE", "hiveframe_wal")
-        return MySQLWriteAheadLog(mysql_dsn=mysql_dsn, table_name=mysql_table)
+        auto_create_db = os.getenv("HIVEFRAME_WAL_MYSQL_AUTO_CREATE_DB", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        return MySQLWriteAheadLog(
+            mysql_dsn=mysql_dsn,
+            table_name=mysql_table,
+            auto_create_db=auto_create_db,
+        )
     raise ValueError(
         f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis|mysql."
     )

@@ -26,6 +26,9 @@ class _FakeMySQLCursor:
         self._result = []
         self.rowcount = 0
 
+        if normalized.startswith("CREATE DATABASE IF NOT EXISTS"):
+            return 0
+
         if normalized.startswith("CREATE TABLE"):
             return 0
 
@@ -93,9 +96,13 @@ class _FakeMySQLConn:
     def __init__(self) -> None:
         self._rows: list[dict] = []
         self._next_lsn = 0
+        self.closed = False
 
     def cursor(self) -> _FakeMySQLCursor:
         return _FakeMySQLCursor(self)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _tx(i: int, state: TxState = TxState.COMMITTED) -> Transaction:
@@ -156,9 +163,11 @@ def test_mysql_wal_compaction_and_history() -> None:
 
 def test_create_default_wal_from_env_mysql(monkeypatch) -> None:
     class _FakePyMySQLModule:
+        calls: list[dict] = []
+
         @staticmethod
         def connect(**kwargs):
-            _ = kwargs
+            _FakePyMySQLModule.calls.append(dict(kwargs))
             return _FakeMySQLConn()
 
     import sys
@@ -169,6 +178,35 @@ def test_create_default_wal_from_env_mysql(monkeypatch) -> None:
 
     wal = create_default_wal()
     assert isinstance(wal, MySQLWriteAheadLog)
+    assert len(_FakePyMySQLModule.calls) == 1
+    assert _FakePyMySQLModule.calls[0]["database"] == "db"
+
+    lsn = wal.append(_tx(1))
+    assert lsn == 1
+
+
+def test_create_default_wal_from_env_mysql_auto_create_db(monkeypatch) -> None:
+    class _FakePyMySQLModule:
+        calls: list[dict] = []
+
+        @staticmethod
+        def connect(**kwargs):
+            _FakePyMySQLModule.calls.append(dict(kwargs))
+            return _FakeMySQLConn()
+
+    import sys
+
+    monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "mysql")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_DSN", "mysql://u:p@localhost:3306/db")
+    monkeypatch.setenv("HIVEFRAME_WAL_MYSQL_AUTO_CREATE_DB", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", _FakePyMySQLModule)
+
+    wal = create_default_wal()
+    assert isinstance(wal, MySQLWriteAheadLog)
+
+    assert len(_FakePyMySQLModule.calls) == 2
+    assert "database" not in _FakePyMySQLModule.calls[0]
+    assert _FakePyMySQLModule.calls[1]["database"] == "db"
 
     lsn = wal.append(_tx(1))
     assert lsn == 1
