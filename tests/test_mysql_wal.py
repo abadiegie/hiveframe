@@ -22,6 +22,7 @@ class _FakeMySQLCursor:
         return False
 
     def execute(self, sql: str, params=None) -> int:
+        self._conn._executed_sql.append(sql)
         normalized = " ".join(sql.strip().split()).upper()
         self._result = []
         self.rowcount = 0
@@ -97,6 +98,7 @@ class _FakeMySQLConn:
         self._rows: list[dict] = []
         self._next_lsn = 0
         self.closed = False
+        self._executed_sql: list[str] = []
 
     def cursor(self) -> _FakeMySQLCursor:
         return _FakeMySQLCursor(self)
@@ -210,6 +212,52 @@ def test_create_default_wal_from_env_mysql_auto_create_db(monkeypatch) -> None:
 
     lsn = wal.append(_tx(1))
     assert lsn == 1
+
+
+def test_create_default_wal_from_env_mysql_database_override(monkeypatch) -> None:
+    class _FakePyMySQLModule:
+        calls: list[dict] = []
+
+        @staticmethod
+        def connect(**kwargs):
+            _FakePyMySQLModule.calls.append(dict(kwargs))
+            return _FakeMySQLConn()
+
+    import sys
+
+    monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "mysql")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_DSN", "mysql://u:p@localhost:3306/default_db")
+    monkeypatch.setenv("HIVEFRAME_WAL_MYSQL_DATABASE", "override_db")
+    monkeypatch.setitem(sys.modules, "pymysql", _FakePyMySQLModule)
+
+    wal = create_default_wal()
+    assert isinstance(wal, MySQLWriteAheadLog)
+    assert len(_FakePyMySQLModule.calls) == 1
+    assert _FakePyMySQLModule.calls[0]["database"] == "override_db"
+
+
+def test_create_default_wal_from_env_mysql_table_override(monkeypatch) -> None:
+    class _FakePyMySQLModule:
+        connections: list[_FakeMySQLConn] = []
+
+        @staticmethod
+        def connect(**kwargs):
+            _ = kwargs
+            conn = _FakeMySQLConn()
+            _FakePyMySQLModule.connections.append(conn)
+            return conn
+
+    import sys
+
+    monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "mysql")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_DSN", "mysql://u:p@localhost:3306/db")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_TABLE", "custom_wal_table")
+    monkeypatch.setitem(sys.modules, "pymysql", _FakePyMySQLModule)
+
+    wal = create_default_wal()
+    assert isinstance(wal, MySQLWriteAheadLog)
+    create_table_sql = _FakePyMySQLModule.connections[0]._executed_sql[0]
+    assert "CREATE TABLE IF NOT EXISTS custom_wal_table" in create_table_sql
 
 
 def test_mysql_wal_payload_is_json_roundtrip() -> None:

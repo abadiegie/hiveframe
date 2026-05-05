@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from typing import Any
 import json
 import logging
@@ -328,6 +328,16 @@ class MySQLWriteAheadLog:
     def _quote_mysql_identifier(name: str) -> str:
         return f"`{name.replace('`', '``')}`"
 
+    @staticmethod
+    def override_dsn_database(dsn: str, database: str) -> str:
+        parsed = urlparse(dsn)
+        if parsed.scheme not in {"mysql", "mysql+pymysql"}:
+            raise ValueError("mysql dsn must use mysql:// or mysql+pymysql://")
+        db_name = database.strip()
+        if not db_name:
+            raise ValueError("mysql database override must not be empty")
+        return urlunparse(parsed._replace(path=f"/{db_name}"))
+
     def _ensure_database(self, pymysql_module: Any, dsn: str) -> None:
         params = self._parse_mysql_dsn(dsn)
         database = str(params["database"])
@@ -486,7 +496,10 @@ def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAhead
         return RedisWriteAheadLog(redis_url=redis_url, prefix=redis_prefix)
     if backend == "mysql":
         mysql_dsn = os.getenv("HIVEFRAME_MYSQL_DSN", "mysql://root@127.0.0.1:3306/hiveframe")
-        mysql_table = os.getenv("HIVEFRAME_WAL_MYSQL_TABLE", "hiveframe_wal")
+        mysql_database = os.getenv("HIVEFRAME_WAL_MYSQL_DATABASE") or os.getenv("HIVEFRAME_MYSQL_DATABASE")
+        if mysql_database:
+            mysql_dsn = MySQLWriteAheadLog.override_dsn_database(mysql_dsn, mysql_database)
+        mysql_table = os.getenv("HIVEFRAME_WAL_MYSQL_TABLE") or os.getenv("HIVEFRAME_MYSQL_TABLE") or "hiveframe_wal"
         auto_create_db = os.getenv("HIVEFRAME_WAL_MYSQL_AUTO_CREATE_DB", "0").strip().lower() in {
             "1",
             "true",
