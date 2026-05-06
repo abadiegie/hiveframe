@@ -287,6 +287,7 @@ class MySQLWriteAheadLog:
     ) -> None:
         self._lock = Lock()
         self._table = table_name
+        self._tx_cells_table = f"{table_name}_tx_cells"
 
         if mysql_conn is not None:
             self._conn = mysql_conn
@@ -353,7 +354,7 @@ class MySQLWriteAheadLog:
                 close()
 
     def _ensure_table(self) -> None:
-        sql = (
+        wal_sql = (
             f"CREATE TABLE IF NOT EXISTS {self._table} ("
             "lsn BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
             "tx_id VARCHAR(128) NOT NULL,"
@@ -362,8 +363,31 @@ class MySQLWriteAheadLog:
             "operations_json LONGTEXT NOT NULL"
             ") ENGINE=InnoDB"
         )
+        tx_cells_sql = (
+            f"CREATE TABLE IF NOT EXISTS {self._tx_cells_table} ("
+            "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+            "lsn BIGINT NOT NULL,"
+            "tx_id VARCHAR(128) NOT NULL,"
+            "frame_id VARCHAR(128) NULL,"
+            "cell_id VARCHAR(255) NOT NULL,"
+            "INDEX idx_tx_id (tx_id),"
+            "INDEX idx_frame_id (frame_id),"
+            "INDEX idx_cell_id (cell_id),"
+            "INDEX idx_lsn (lsn)"
+            ") ENGINE=InnoDB"
+        )
         with self._conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(wal_sql)
+            cur.execute(tx_cells_sql)
+
+    @staticmethod
+    def _extract_frame_id(cell_id: Any) -> str | None:
+        if not isinstance(cell_id, str):
+            return None
+        if "::" not in cell_id:
+            return None
+        frame_id = cell_id.split("::", 1)[0].strip()
+        return frame_id or None
 
     def append(self, transaction: Transaction) -> int:
         with self._lock:
@@ -378,6 +402,19 @@ class MySQLWriteAheadLog:
                     (transaction.tx_id, transaction.state.value, entry_ts, operations_json),
                 )
                 lsn = int(getattr(cur, "lastrowid", 0) or 0)
+                for operation in transaction.operations:
+                    cur.execute(
+                        (
+                            f"INSERT INTO {self._tx_cells_table} (lsn, tx_id, frame_id, cell_id) "
+                            "VALUES (%s, %s, %s, %s)"
+                        ),
+                        (
+                            lsn,
+                            transaction.tx_id,
+                            self._extract_frame_id(operation.cell_id),
+                            operation.cell_id,
+                        ),
+                    )
             logger.info(
                 "MySQLWAL.append lsn=%s tx_id=%s state=%s ops=%d",
                 lsn,
@@ -437,6 +474,7 @@ class MySQLWriteAheadLog:
                     return 0
                 threshold = lsns[-keep_last_n]
                 cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (threshold,))
+                cur.execute(f"DELETE FROM {self._tx_cells_table} WHERE lsn < %s", (threshold,))
                 removed = int(getattr(cur, "rowcount", 0))
             logger.info("MySQLWAL.compact: removed %d entries, kept %d", removed, keep_last_n)
             return removed
@@ -445,6 +483,7 @@ class MySQLWriteAheadLog:
         with self._lock:
             with self._conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (int(lsn),))
+                cur.execute(f"DELETE FROM {self._tx_cells_table} WHERE lsn < %s", (int(lsn),))
                 removed = int(getattr(cur, "rowcount", 0))
             logger.info("MySQLWAL.compact_before_lsn: removed %d entries before lsn %d", removed, lsn)
             return removed
