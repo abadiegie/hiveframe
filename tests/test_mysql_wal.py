@@ -99,6 +99,12 @@ class _FakeMySQLCursor:
             self._result = [(r["lsn"],) for r in sorted(self._conn._rows, key=lambda item: int(item["lsn"]))]
             return len(self._result)
 
+        if normalized.startswith("SELECT COUNT(*), COALESCE(MAX(LSN), 0) FROM"):
+            count = len(self._conn._rows)
+            max_lsn = max((int(r["lsn"]) for r in self._conn._rows), default=0)
+            self._result = [(count, max_lsn)]
+            return 1
+
         if normalized.startswith("SELECT LSN, TX_ID, STATE, TS, OPERATIONS_JSON FROM"):
             self._result = [
                 (r["lsn"], r["tx_id"], r["state"], r["ts"], r["operations_json"])
@@ -220,6 +226,8 @@ def test_mysql_wal_append_and_get_since() -> None:
     entries = wal.get_since(1)
     assert len(entries) == 1
     assert entries[0]["lsn"] == 2
+
+    assert wal.get_metrics() == {"total_entries": 2, "last_lsn": 2}
 
 
 def test_mysql_wal_get_committed_filters() -> None:

@@ -1147,12 +1147,19 @@ class DFrame:
 
     def get_metrics(self) -> dict:
         """Return comprehensive metrics untuk monitoring/observability."""
+        wal_metrics_getter = getattr(self._coordinator.wal, "get_metrics", None)
+        if callable(wal_metrics_getter):
+            wal_metrics = wal_metrics_getter()
+        else:
+            wal_entries = getattr(self._coordinator.wal, "_entries", [])
+            next_lsn = int(getattr(self._coordinator.wal, "_next_lsn", 1))
+            wal_metrics = {
+                "total_entries": len(wal_entries),
+                "last_lsn": max(0, next_lsn - 1),
+            }
         return {
             "coordinator": self._coordinator.get_stats(),
-            "wal": {
-                "total_entries": len(self._coordinator.wal._entries),
-                "last_lsn": self._coordinator.wal._next_lsn - 1,
-            },
+            "wal": wal_metrics,
             "write_node": {
                 "rows": len(self._coordinator.write_node._df),
                 "cols": len(self._coordinator.write_node._df.columns),

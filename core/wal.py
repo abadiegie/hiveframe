@@ -148,6 +148,13 @@ class WriteAheadLog:
                         })
             return history
 
+    def get_metrics(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "total_entries": len(self._entries),
+                "last_lsn": self._next_lsn - 1,
+            }
+
 
 class RedisWriteAheadLog:
     """Redis-backed WAL with global INCR LSN ordering.
@@ -270,6 +277,16 @@ class RedisWriteAheadLog:
                             }
                         )
             return history
+
+    def get_metrics(self) -> dict[str, int]:
+        with self._lock:
+            total_entries = int(self._redis.zcard(self._entries_key))
+            last_entries = self._decode_entries(self._redis.zrange(self._entries_key, -1, -1))
+            last_lsn = int(last_entries[0].get("lsn", 0)) if last_entries else 0
+            return {
+                "total_entries": total_entries,
+                "last_lsn": last_lsn,
+            }
 
 
 class MySQLWriteAheadLog:
@@ -568,6 +585,18 @@ class MySQLWriteAheadLog:
             cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} ORDER BY lsn ASC")
             rows = list(cur.fetchall())
         return self._build_cell_history_from_rows(rows, cell_id)
+
+    def get_metrics(self) -> dict[str, int]:
+        with self._lock:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*), COALESCE(MAX(lsn), 0) FROM {self._table_sql}"
+                )
+                row = cur.fetchall()[0]
+            return {
+                "total_entries": int(row[0]),
+                "last_lsn": int(row[1]),
+            }
 
 
 def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAheadLog:

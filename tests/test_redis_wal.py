@@ -91,6 +91,7 @@ def test_redis_wal_append_and_get_since() -> None:
     entries = wal.get_since(1)
     assert len(entries) == 1
     assert entries[0]["lsn"] == 2
+    assert wal.get_metrics() == {"total_entries": 2, "last_lsn": 2}
 
 
 def test_redis_wal_get_committed_filters() -> None:
@@ -125,7 +126,6 @@ def test_create_default_wal_from_env_redis(monkeypatch) -> None:
                 _ = decode_responses
                 return _FakeRedis()
 
-    import core.wal as wal_mod
 
     monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "redis")
     monkeypatch.setenv("HIVEFRAME_REDIS_URL", "redis://unused")
