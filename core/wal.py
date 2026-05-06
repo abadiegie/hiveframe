@@ -339,6 +339,10 @@ class MySQLWriteAheadLog:
             raise ValueError(
                 f"invalid mysql table name '{name}'. Use letters, numbers, and underscores only."
             )
+        if len(table_name) > 64:
+            raise ValueError(
+                f"invalid mysql table name '{name}'. MySQL identifier length must be <= 64."
+            )
         return table_name
 
     @staticmethod
@@ -522,7 +526,7 @@ class MySQLWriteAheadLog:
                 with self._conn.cursor() as cur:
                     cur.execute(
                         (
-                            "SELECT w.lsn, w.tx_id, w.state, w.ts, w.operations_json "
+                            "SELECT DISTINCT w.lsn, w.tx_id, w.state, w.ts, w.operations_json "
                             f"FROM {self._table_sql} AS w "
                             f"INNER JOIN {self._tx_cells_table_sql} AS t ON t.lsn = w.lsn "
                             "WHERE t.cell_id = %s "
@@ -531,8 +535,12 @@ class MySQLWriteAheadLog:
                         (cell_id,),
                     )
                     rows = list(cur.fetchall())
+                # Fallback for legacy rows that may exist in WAL but not in trace table.
+                if not rows:
+                    return self._get_cell_history_full_scan(cell_id)
                 return self._build_cell_history_from_rows(rows, cell_id)
-            except Exception:
+            except Exception as exc:
+                logger.warning("MySQLWAL trace-table history lookup failed for cell_id=%s: %s", cell_id, exc)
                 return self._get_cell_history_full_scan(cell_id)
 
     def _build_cell_history_from_rows(self, rows: list[tuple[Any, ...]], cell_id: str) -> list[dict[str, Any]]:

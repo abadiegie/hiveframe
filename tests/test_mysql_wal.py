@@ -358,6 +358,18 @@ def test_create_default_wal_from_env_mysql_invalid_table_name(monkeypatch) -> No
         assert "invalid mysql table name" in str(exc)
 
 
+def test_create_default_wal_from_env_mysql_table_name_too_long(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "mysql")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_DSN", "mysql://u:p@localhost:3306/db")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_TABLE", "a" * 65)
+
+    try:
+        create_default_wal()
+        raise AssertionError("Expected ValueError for long table name")
+    except ValueError as exc:
+        assert "length" in str(exc)
+
+
 def test_mysql_wal_payload_is_json_roundtrip() -> None:
     wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=_FakeMySQLConn())
     wal.append(_tx(1))
@@ -420,6 +432,25 @@ def test_mysql_wal_compact_removed_count_tracks_wal_rows_only() -> None:
 
     removed = wal.compact(keep_last_n=1)
     assert removed == 2
+
+
+def test_mysql_wal_cell_history_falls_back_when_trace_rows_missing() -> None:
+    conn = _FakeMySQLConn()
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    tx = Transaction(
+        operations=[
+            Operation(cell_id="frame_a::city_0", old_value=None, new_value="jakarta", author_type="human", author_id="u"),
+        ]
+    )
+    tx.state = TxState.COMMITTED
+    wal.append(tx)
+
+    # Simulate legacy WAL rows without trace rows.
+    conn._trace_rows = []
+
+    history = wal.get_cell_history("frame_a::city_0")
+    assert len(history) == 1
+    assert history[0]["new_value"] == "jakarta"
 
 
 def test_mysql_wal_append_rollback_on_trace_insert_failure() -> None:
