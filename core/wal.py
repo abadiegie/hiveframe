@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 import os
+import re
 from urllib.parse import urlparse, urlunparse
 from typing import Any
 import json
@@ -286,8 +287,10 @@ class MySQLWriteAheadLog:
         auto_create_db: bool = False,
     ) -> None:
         self._lock = Lock()
-        self._table = table_name
-        self._tx_cells_table = f"{table_name}_tx_cells"
+        self._table = self._validate_table_name(table_name)
+        self._tx_cells_table = self._validate_table_name(f"{self._table}_tx_cells")
+        self._table_sql = self._quote_mysql_identifier(self._table)
+        self._tx_cells_table_sql = self._quote_mysql_identifier(self._tx_cells_table)
 
         if mysql_conn is not None:
             self._conn = mysql_conn
@@ -330,6 +333,15 @@ class MySQLWriteAheadLog:
         return f"`{name.replace('`', '``')}`"
 
     @staticmethod
+    def _validate_table_name(name: str) -> str:
+        table_name = str(name).strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+            raise ValueError(
+                f"invalid mysql table name '{name}'. Use letters, numbers, and underscores only."
+            )
+        return table_name
+
+    @staticmethod
     def override_dsn_database(dsn: str, database: str) -> str:
         parsed = urlparse(dsn)
         if parsed.scheme not in {"mysql", "mysql+pymysql"}:
@@ -355,7 +367,7 @@ class MySQLWriteAheadLog:
 
     def _ensure_table(self) -> None:
         wal_sql = (
-            f"CREATE TABLE IF NOT EXISTS {self._table} ("
+            f"CREATE TABLE IF NOT EXISTS {self._table_sql} ("
             "lsn BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
             "tx_id VARCHAR(128) NOT NULL,"
             "state VARCHAR(32) NOT NULL,"
@@ -364,7 +376,7 @@ class MySQLWriteAheadLog:
             ") ENGINE=InnoDB"
         )
         tx_cells_sql = (
-            f"CREATE TABLE IF NOT EXISTS {self._tx_cells_table} ("
+            f"CREATE TABLE IF NOT EXISTS {self._tx_cells_table_sql} ("
             "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
             "lsn BIGINT NOT NULL,"
             "tx_id VARCHAR(128) NOT NULL,"
@@ -393,28 +405,41 @@ class MySQLWriteAheadLog:
         with self._lock:
             entry_ts = datetime.now(timezone.utc).isoformat()
             operations_json = json.dumps([op.to_dict() for op in transaction.operations], separators=(",", ":"), sort_keys=True)
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    (
-                        f"INSERT INTO {self._table} (tx_id, state, ts, operations_json) "
-                        "VALUES (%s, %s, %s, %s)"
-                    ),
-                    (transaction.tx_id, transaction.state.value, entry_ts, operations_json),
-                )
-                lsn = int(getattr(cur, "lastrowid", 0) or 0)
-                for operation in transaction.operations:
+            lsn = 0
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute("START TRANSACTION")
                     cur.execute(
                         (
-                            f"INSERT INTO {self._tx_cells_table} (lsn, tx_id, frame_id, cell_id) "
+                            f"INSERT INTO {self._table_sql} (tx_id, state, ts, operations_json) "
                             "VALUES (%s, %s, %s, %s)"
                         ),
                         (
-                            lsn,
                             transaction.tx_id,
-                            self._extract_frame_id(operation.cell_id),
-                            operation.cell_id,
+                            transaction.state.value,
+                            entry_ts,
+                            operations_json,
                         ),
                     )
+                    lsn = int(getattr(cur, "lastrowid", 0) or 0)
+                    for operation in transaction.operations:
+                        cur.execute(
+                            (
+                                f"INSERT INTO {self._tx_cells_table_sql} (lsn, tx_id, frame_id, cell_id) "
+                                "VALUES (%s, %s, %s, %s)"
+                            ),
+                            (
+                                lsn,
+                                transaction.tx_id,
+                                self._extract_frame_id(operation.cell_id),
+                                operation.cell_id,
+                            ),
+                        )
+                    cur.execute("COMMIT")
+            except Exception:
+                with self._conn.cursor() as rollback_cur:
+                    rollback_cur.execute("ROLLBACK")
+                raise
             logger.info(
                 "MySQLWAL.append lsn=%s tx_id=%s state=%s ops=%d",
                 lsn,
@@ -444,7 +469,7 @@ class MySQLWriteAheadLog:
             with self._conn.cursor() as cur:
                 cur.execute(
                     (
-                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} "
+                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} "
                         "WHERE lsn > %s ORDER BY lsn ASC"
                     ),
                     (int(lsn),),
@@ -457,7 +482,7 @@ class MySQLWriteAheadLog:
             with self._conn.cursor() as cur:
                 cur.execute(
                     (
-                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} "
+                        f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} "
                         "WHERE state IN (%s, %s) ORDER BY lsn ASC"
                     ),
                     (TxState.COMMITTED.value, TxState.SYNCED.value),
@@ -468,30 +493,30 @@ class MySQLWriteAheadLog:
     def compact(self, keep_last_n: int = 1000) -> int:
         with self._lock:
             with self._conn.cursor() as cur:
-                cur.execute(f"SELECT lsn FROM {self._table} ORDER BY lsn ASC")
+                cur.execute(f"SELECT lsn FROM {self._table_sql} ORDER BY lsn ASC")
                 lsns = [int(row[0]) for row in cur.fetchall()]
                 if len(lsns) <= keep_last_n:
                     return 0
                 threshold = lsns[-keep_last_n]
-                cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (threshold,))
-                cur.execute(f"DELETE FROM {self._tx_cells_table} WHERE lsn < %s", (threshold,))
+                cur.execute(f"DELETE FROM {self._table_sql} WHERE lsn < %s", (threshold,))
                 removed = int(getattr(cur, "rowcount", 0))
+                cur.execute(f"DELETE FROM {self._tx_cells_table_sql} WHERE lsn < %s", (threshold,))
             logger.info("MySQLWAL.compact: removed %d entries, kept %d", removed, keep_last_n)
             return removed
 
     def compact_before_lsn(self, lsn: int) -> int:
         with self._lock:
             with self._conn.cursor() as cur:
-                cur.execute(f"DELETE FROM {self._table} WHERE lsn < %s", (int(lsn),))
-                cur.execute(f"DELETE FROM {self._tx_cells_table} WHERE lsn < %s", (int(lsn),))
+                cur.execute(f"DELETE FROM {self._table_sql} WHERE lsn < %s", (int(lsn),))
                 removed = int(getattr(cur, "rowcount", 0))
+                cur.execute(f"DELETE FROM {self._tx_cells_table_sql} WHERE lsn < %s", (int(lsn),))
             logger.info("MySQLWAL.compact_before_lsn: removed %d entries before lsn %d", removed, lsn)
             return removed
 
     def get_cell_history(self, cell_id: str) -> list[dict]:
         with self._lock:
             with self._conn.cursor() as cur:
-                cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table} ORDER BY lsn ASC")
+                cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} ORDER BY lsn ASC")
                 rows = list(cur.fetchall())
 
             history = []

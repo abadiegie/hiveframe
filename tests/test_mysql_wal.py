@@ -27,13 +27,25 @@ class _FakeMySQLCursor:
         self._result = []
         self.rowcount = 0
 
+        if normalized == "START TRANSACTION":
+            self._conn._begin_tx()
+            return 0
+
+        if normalized == "COMMIT":
+            self._conn._commit_tx()
+            return 0
+
+        if normalized == "ROLLBACK":
+            self._conn._rollback_tx()
+            return 0
+
         if normalized.startswith("CREATE DATABASE IF NOT EXISTS"):
             return 0
 
         if normalized.startswith("CREATE TABLE"):
             return 0
 
-        if normalized.startswith("INSERT INTO"):
+        if normalized.startswith("INSERT INTO") and "(TX_ID, STATE, TS, OPERATIONS_JSON)" in normalized:
             tx_id, state, ts, operations_json = params
             self._conn._next_lsn += 1
             lsn = self._conn._next_lsn
@@ -47,6 +59,21 @@ class _FakeMySQLCursor:
                 }
             )
             self.lastrowid = lsn
+            self.rowcount = 1
+            return 1
+
+        if normalized.startswith("INSERT INTO") and "(LSN, TX_ID, FRAME_ID, CELL_ID)" in normalized:
+            if self._conn.fail_trace_insert:
+                raise RuntimeError("forced trace insert failure")
+            lsn, tx_id, frame_id, cell_id = params
+            self._conn._trace_rows.append(
+                {
+                    "lsn": int(lsn),
+                    "tx_id": str(tx_id),
+                    "frame_id": frame_id,
+                    "cell_id": str(cell_id),
+                }
+            )
             self.rowcount = 1
             return 1
 
@@ -79,6 +106,14 @@ class _FakeMySQLCursor:
             ]
             return len(self._result)
 
+        if normalized.startswith("DELETE FROM") and "_TX_CELLS" in normalized and "WHERE LSN < %S" in normalized:
+            threshold = int(params[0])
+            before = len(self._conn._trace_rows)
+            self._conn._trace_rows = [r for r in self._conn._trace_rows if int(r["lsn"]) >= threshold]
+            removed = before - len(self._conn._trace_rows)
+            self.rowcount = removed
+            return removed
+
         if normalized.startswith("DELETE FROM") and "WHERE LSN < %S" in normalized:
             threshold = int(params[0])
             before = len(self._conn._rows)
@@ -96,15 +131,33 @@ class _FakeMySQLCursor:
 class _FakeMySQLConn:
     def __init__(self) -> None:
         self._rows: list[dict] = []
+        self._trace_rows: list[dict] = []
         self._next_lsn = 0
         self.closed = False
         self._executed_sql: list[str] = []
+        self.fail_trace_insert = False
+        self._tx_snapshot: tuple[list[dict], list[dict], int] | None = None
 
     def cursor(self) -> _FakeMySQLCursor:
         return _FakeMySQLCursor(self)
 
     def close(self) -> None:
         self.closed = True
+
+    def _begin_tx(self) -> None:
+        self._tx_snapshot = (list(self._rows), list(self._trace_rows), self._next_lsn)
+
+    def _commit_tx(self) -> None:
+        self._tx_snapshot = None
+
+    def _rollback_tx(self) -> None:
+        if self._tx_snapshot is None:
+            return
+        rows, trace_rows, next_lsn = self._tx_snapshot
+        self._rows = rows
+        self._trace_rows = trace_rows
+        self._next_lsn = next_lsn
+        self._tx_snapshot = None
 
 
 def _tx(i: int, state: TxState = TxState.COMMITTED) -> Transaction:
@@ -257,7 +310,19 @@ def test_create_default_wal_from_env_mysql_table_override(monkeypatch) -> None:
     wal = create_default_wal()
     assert isinstance(wal, MySQLWriteAheadLog)
     create_table_sql = _FakePyMySQLModule.connections[0]._executed_sql[0]
-    assert "CREATE TABLE IF NOT EXISTS custom_wal_table" in create_table_sql
+    assert "CREATE TABLE IF NOT EXISTS `custom_wal_table`" in create_table_sql
+
+
+def test_create_default_wal_from_env_mysql_invalid_table_name(monkeypatch) -> None:
+    monkeypatch.setenv("HIVEFRAME_WAL_BACKEND", "mysql")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_DSN", "mysql://u:p@localhost:3306/db")
+    monkeypatch.setenv("HIVEFRAME_MYSQL_TABLE", "bad-table;drop")
+
+    try:
+        create_default_wal()
+        raise AssertionError("Expected ValueError for invalid table name")
+    except ValueError as exc:
+        assert "invalid mysql table name" in str(exc)
 
 
 def test_mysql_wal_payload_is_json_roundtrip() -> None:
@@ -267,4 +332,80 @@ def test_mysql_wal_payload_is_json_roundtrip() -> None:
     entries = wal.get_since(0)
     assert entries
     json.dumps(entries[0])
+
+
+def test_mysql_wal_writes_tx_cells_trace_rows() -> None:
+    conn = _FakeMySQLConn()
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    tx = Transaction(
+        operations=[
+            Operation(cell_id="frame_a::city_0", old_value=None, new_value="jakarta", author_type="human", author_id="u"),
+            Operation(cell_id="legacy_cell", old_value=None, new_value="x", author_type="human", author_id="u"),
+        ]
+    )
+    tx.state = TxState.COMMITTED
+    wal.append(tx)
+
+    assert len(conn._trace_rows) == 2
+    assert conn._trace_rows[0]["frame_id"] == "frame_a"
+    assert conn._trace_rows[1]["frame_id"] is None
+
+
+def test_mysql_wal_compaction_cleans_tx_cells_trace_rows() -> None:
+    conn = _FakeMySQLConn()
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    for i in range(5):
+        wal.append(_tx(i + 1))
+
+    wal.compact(keep_last_n=2)
+    assert [row["lsn"] for row in conn._trace_rows] == [4, 5]
+
+
+def test_mysql_wal_compact_before_lsn_cleans_tx_cells_trace_rows() -> None:
+    conn = _FakeMySQLConn()
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    for i in range(5):
+        wal.append(_tx(i + 1))
+
+    wal.compact_before_lsn(4)
+    assert [row["lsn"] for row in conn._trace_rows] == [4, 5]
+
+
+def test_mysql_wal_compact_removed_count_tracks_wal_rows_only() -> None:
+    conn = _FakeMySQLConn()
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    tx = Transaction(
+        operations=[
+            Operation(cell_id="f::a_0", old_value=None, new_value=1, author_type="human", author_id="u"),
+            Operation(cell_id="f::b_0", old_value=None, new_value=2, author_type="human", author_id="u"),
+        ]
+    )
+    tx.state = TxState.COMMITTED
+    for _ in range(3):
+        wal.append(tx)
+
+    removed = wal.compact(keep_last_n=1)
+    assert removed == 2
+
+
+def test_mysql_wal_append_rollback_on_trace_insert_failure() -> None:
+    conn = _FakeMySQLConn()
+    conn.fail_trace_insert = True
+    wal = MySQLWriteAheadLog(mysql_dsn="mysql://u:p@localhost:3306/db", mysql_conn=conn)
+    tx = Transaction(
+        operations=[
+            Operation(cell_id="f::a_0", old_value=None, new_value=1, author_type="human", author_id="u"),
+        ]
+    )
+    tx.state = TxState.COMMITTED
+
+    try:
+        wal.append(tx)
+        raise AssertionError("Expected append to fail")
+    except RuntimeError:
+        pass
+
+    assert conn._rows == []
+    assert conn._trace_rows == []
+
 
