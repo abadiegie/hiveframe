@@ -422,18 +422,21 @@ class MySQLWriteAheadLog:
                         ),
                     )
                     lsn = int(getattr(cur, "lastrowid", 0) or 0)
-                    for operation in transaction.operations:
-                        cur.execute(
+                    if transaction.operations:
+                        cur.executemany(
                             (
                                 f"INSERT INTO {self._tx_cells_table_sql} (lsn, tx_id, frame_id, cell_id) "
                                 "VALUES (%s, %s, %s, %s)"
                             ),
-                            (
-                                lsn,
-                                transaction.tx_id,
-                                self._extract_frame_id(operation.cell_id),
-                                operation.cell_id,
-                            ),
+                            [
+                                (
+                                    lsn,
+                                    transaction.tx_id,
+                                    self._extract_frame_id(operation.cell_id),
+                                    operation.cell_id,
+                                )
+                                for operation in transaction.operations
+                            ],
                         )
                     cur.execute("COMMIT")
             except Exception:
@@ -515,28 +518,48 @@ class MySQLWriteAheadLog:
 
     def get_cell_history(self, cell_id: str) -> list[dict]:
         with self._lock:
-            with self._conn.cursor() as cur:
-                cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} ORDER BY lsn ASC")
-                rows = list(cur.fetchall())
+            try:
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        (
+                            "SELECT w.lsn, w.tx_id, w.state, w.ts, w.operations_json "
+                            f"FROM {self._table_sql} AS w "
+                            f"INNER JOIN {self._tx_cells_table_sql} AS t ON t.lsn = w.lsn "
+                            "WHERE t.cell_id = %s "
+                            "ORDER BY w.lsn ASC"
+                        ),
+                        (cell_id,),
+                    )
+                    rows = list(cur.fetchall())
+                return self._build_cell_history_from_rows(rows, cell_id)
+            except Exception:
+                return self._get_cell_history_full_scan(cell_id)
 
-            history = []
-            for row in rows:
-                entry = self._row_to_entry(row)
-                for op in entry.get("operations", []):
-                    if op.get("cell_id") == cell_id:
-                        history.append(
-                            {
-                                "lsn": entry.get("lsn"),
-                                "timestamp": entry.get("timestamp"),
-                                "tx_id": entry.get("tx_id"),
-                                "old_value": op.get("old_value"),
-                                "new_value": op.get("new_value"),
-                                "author_type": op.get("author_type"),
-                                "author_id": op.get("author_id"),
-                                "confidence": op.get("confidence"),
-                            }
-                        )
-            return history
+    def _build_cell_history_from_rows(self, rows: list[tuple[Any, ...]], cell_id: str) -> list[dict[str, Any]]:
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            entry = self._row_to_entry(row)
+            for op in entry.get("operations", []):
+                if op.get("cell_id") == cell_id:
+                    history.append(
+                        {
+                            "lsn": entry.get("lsn"),
+                            "timestamp": entry.get("timestamp"),
+                            "tx_id": entry.get("tx_id"),
+                            "old_value": op.get("old_value"),
+                            "new_value": op.get("new_value"),
+                            "author_type": op.get("author_type"),
+                            "author_id": op.get("author_id"),
+                            "confidence": op.get("confidence"),
+                        }
+                    )
+        return history
+
+    def _get_cell_history_full_scan(self, cell_id: str) -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT lsn, tx_id, state, ts, operations_json FROM {self._table_sql} ORDER BY lsn ASC")
+            rows = list(cur.fetchall())
+        return self._build_cell_history_from_rows(rows, cell_id)
 
 
 def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAheadLog:

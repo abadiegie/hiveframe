@@ -106,6 +106,16 @@ class _FakeMySQLCursor:
             ]
             return len(self._result)
 
+        if "INNER JOIN" in normalized and "WHERE T.CELL_ID = %S" in normalized:
+            cell_id = str(params[0])
+            matched_lsns = {int(row["lsn"]) for row in self._conn._trace_rows if str(row["cell_id"]) == cell_id}
+            rows = [r for r in self._conn._rows if int(r["lsn"]) in matched_lsns]
+            self._result = [
+                (r["lsn"], r["tx_id"], r["state"], r["ts"], r["operations_json"])
+                for r in sorted(rows, key=lambda item: int(item["lsn"]))
+            ]
+            return len(self._result)
+
         if normalized.startswith("DELETE FROM") and "_TX_CELLS" in normalized and "WHERE LSN < %S" in normalized:
             threshold = int(params[0])
             before = len(self._conn._trace_rows)
@@ -123,6 +133,29 @@ class _FakeMySQLCursor:
             return removed
 
         raise AssertionError(f"Unsupported SQL in fake mysql cursor: {sql}")
+
+    def executemany(self, sql: str, seq_of_params) -> int:
+        self._conn._executed_sql.append(sql)
+        normalized = " ".join(sql.strip().split()).upper()
+        if not (normalized.startswith("INSERT INTO") and "(LSN, TX_ID, FRAME_ID, CELL_ID)" in normalized):
+            raise AssertionError(f"Unsupported SQL in fake mysql cursor executemany: {sql}")
+
+        count = 0
+        for params in seq_of_params:
+            if self._conn.fail_trace_insert:
+                raise RuntimeError("forced trace insert failure")
+            lsn, tx_id, frame_id, cell_id = params
+            self._conn._trace_rows.append(
+                {
+                    "lsn": int(lsn),
+                    "tx_id": str(tx_id),
+                    "frame_id": frame_id,
+                    "cell_id": str(cell_id),
+                }
+            )
+            count += 1
+        self.rowcount = count
+        return count
 
     def fetchall(self) -> list[tuple]:
         return list(self._result)
@@ -349,6 +382,7 @@ def test_mysql_wal_writes_tx_cells_trace_rows() -> None:
     assert len(conn._trace_rows) == 2
     assert conn._trace_rows[0]["frame_id"] == "frame_a"
     assert conn._trace_rows[1]["frame_id"] is None
+    assert any("INSERT INTO `hiveframe_wal_tx_cells`" in sql for sql in conn._executed_sql)
 
 
 def test_mysql_wal_compaction_cleans_tx_cells_trace_rows() -> None:
