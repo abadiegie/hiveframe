@@ -309,19 +309,25 @@ class MySQLWriteAheadLog:
         self._table_sql = self._quote_mysql_identifier(self._table)
         self._tx_cells_table_sql = self._quote_mysql_identifier(self._tx_cells_table)
 
+        self._mysql_dsn: str | None = None
+        self._conn_params: dict[str, Any] | None = None
+        self._pymysql: Any = None
+
         if mysql_conn is not None:
             self._conn = mysql_conn
         else:
             try:
                 import pymysql
+                self._pymysql = pymysql
             except ImportError as exc:
                 raise ImportError(
                     "pymysql package required for MySQLWriteAheadLog: pip install hiveframe[mysql]"
                 ) from exc
             if auto_create_db:
                 self._ensure_database(pymysql, mysql_dsn)
-            params = self._parse_mysql_dsn(mysql_dsn)
-            self._conn = pymysql.connect(autocommit=True, **params)
+            self._mysql_dsn = mysql_dsn
+            self._conn_params = self._parse_mysql_dsn(mysql_dsn)
+            self._conn = pymysql.connect(autocommit=True, **self._conn_params)
 
         self._ensure_table()
         logger.info("MySQLWriteAheadLog initialized table=%s", self._table)
@@ -386,6 +392,20 @@ class MySQLWriteAheadLog:
             if callable(close):
                 close()
 
+    def _ensure_connection(self) -> None:
+        """Ping the connection and reconnect if it has been dropped."""
+        if self._conn_params is None or self._pymysql is None:
+            return  # externally supplied connection — caller manages lifecycle
+        try:
+            self._conn.ping(reconnect=False)
+        except Exception:
+            logger.warning("MySQLWriteAheadLog: connection lost, reconnecting")
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = self._pymysql.connect(autocommit=True, **self._conn_params)
+
     def _ensure_table(self) -> None:
         wal_sql = (
             f"CREATE TABLE IF NOT EXISTS {self._table_sql} ("
@@ -424,6 +444,7 @@ class MySQLWriteAheadLog:
 
     def append(self, transaction: Transaction) -> int:
         with self._lock:
+            self._ensure_connection()
             entry_ts = datetime.now(timezone.utc).isoformat()
             operations_json = json.dumps([op.to_dict() for op in transaction.operations], separators=(",", ":"), sort_keys=True)
             lsn = 0
@@ -490,6 +511,7 @@ class MySQLWriteAheadLog:
 
     def get_since(self, lsn: int) -> list[dict[str, Any]]:
         with self._lock:
+            self._ensure_connection()
             with self._conn.cursor() as cur:
                 cur.execute(
                     (
@@ -503,6 +525,7 @@ class MySQLWriteAheadLog:
 
     def get_committed(self) -> list[dict[str, Any]]:
         with self._lock:
+            self._ensure_connection()
             with self._conn.cursor() as cur:
                 cur.execute(
                     (
@@ -516,6 +539,7 @@ class MySQLWriteAheadLog:
 
     def compact(self, keep_last_n: int = 1000) -> int:
         with self._lock:
+            self._ensure_connection()
             with self._conn.cursor() as cur:
                 cur.execute(f"SELECT lsn FROM {self._table_sql} ORDER BY lsn ASC")
                 lsns = [int(row[0]) for row in cur.fetchall()]
@@ -530,6 +554,7 @@ class MySQLWriteAheadLog:
 
     def compact_before_lsn(self, lsn: int) -> int:
         with self._lock:
+            self._ensure_connection()
             with self._conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {self._table_sql} WHERE lsn < %s", (int(lsn),))
                 removed = int(getattr(cur, "rowcount", 0))
@@ -539,6 +564,7 @@ class MySQLWriteAheadLog:
 
     def get_cell_history(self, cell_id: str) -> list[dict]:
         with self._lock:
+            self._ensure_connection()
             try:
                 with self._conn.cursor() as cur:
                     cur.execute(
@@ -588,6 +614,7 @@ class MySQLWriteAheadLog:
 
     def get_metrics(self) -> dict[str, int]:
         with self._lock:
+            self._ensure_connection()
             with self._conn.cursor() as cur:
                 cur.execute(
                     f"SELECT COUNT(*), COALESCE(MAX(lsn), 0) FROM {self._table_sql}"
