@@ -349,6 +349,7 @@ class AgentWriter:
         chunk_size: int = 50,
         progress_callback: Optional[Callable[[int, int], None]] = None,
         custom_instruction: str | None = None,
+        context_columns: list[str] | None = None,
     ) -> dict:
         """
         Normalize one column in streaming mode using chunked LLM calls.
@@ -363,6 +364,9 @@ class AgentWriter:
             custom_instruction: Optional custom instruction for normalization rule.
                                 If None, uses generic "Normalize column '{column}'".
                                 Example: "Standardize city names to proper Indonesian format"
+            context_columns: Optional additional columns to include in chunk context.
+                             When provided, snapshot is limited to target column + these
+                             columns (if they exist). When None, all frame columns are used.
 
         Returns:
             {"written": int, "total": int}
@@ -433,16 +437,24 @@ class AgentWriter:
                 len(chunk),
             )
 
-            # Build snapshot with target column + context columns
-            # Get all columns for context
-            all_cols = list(chunk.columns)
-            snapshot = chunk[all_cols].to_string()
+            # Build snapshot with target column + optional context columns.
+            if context_columns is None:
+                selected_cols = list(chunk.columns)
+            else:
+                requested = [column, *context_columns]
+                selected_cols = [col for col in requested if col in chunk.columns]
+                # Keep deterministic order and avoid duplicates.
+                selected_cols = list(dict.fromkeys(selected_cols))
+                if column not in selected_cols:
+                    selected_cols.insert(0, column)
+
+            snapshot = chunk[selected_cols].to_string()
 
             logger.debug(
                 "stream_normalize CONTEXT: chunk %d snapshot_lines=%d columns=%s",
                 chunk_idx + 1,
                 snapshot.count("\n"),
-                ", ".join(f"'{c}'" for c in all_cols[:3]) + ("..." if len(all_cols) > 3 else ""),
+                ", ".join(f"'{c}'" for c in selected_cols[:3]) + ("..." if len(selected_cols) > 3 else ""),
             )
 
             # Use new context-aware prompt builder
@@ -453,7 +465,7 @@ class AgentWriter:
                 frame_id=self._frame_id or "unknown",
                 column_name=column,
                 chunk_start=start,
-                context_columns=all_cols,
+                context_columns=selected_cols,
             )
 
             logger.debug(

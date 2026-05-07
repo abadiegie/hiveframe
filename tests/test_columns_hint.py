@@ -50,12 +50,13 @@ def test_build_context_with_hint_missing_column_skipped(frame_data: DFrame, capl
     assert "columns not found" in caplog.text
 
 
-def test_build_context_with_hint_all_missing_fallback(frame_data: DFrame, caplog: pytest.LogCaptureFixture) -> None:
+def test_build_context_with_hint_all_missing_keeps_context_empty(frame_data: DFrame, caplog: pytest.LogCaptureFixture) -> None:
     agent = MultiFrameAgent({"data": frame_data})
     with caplog.at_level("WARNING"):
         ctx = agent._build_context_with_hint("data", frame_data, ["nonexistent1", "nonexistent2"], max_rows=5)
-    assert "falling back to all columns" in caplog.text
-    assert "extra_col" in ctx
+    assert "using empty hinted context" in caplog.text
+    assert "showing_columns: []" in ctx
+    assert "extra_col" not in ctx
 
 
 def test_build_context_with_hint_includes_dtype(frame_data: DFrame) -> None:
@@ -140,10 +141,10 @@ def test_analyze_query_with_hint_schema_context(frame_data: DFrame, monkeypatch:
     )
 
     first_blob = "\n".join(msg["content"] for msg in calls[0] if msg["role"] == "system")
-    # Query mode now always uses full schema (PandasAI-style) even when columns_hint is provided.
-    assert "Column dtypes:" in first_blob
-    assert "Relevant columns (use these for queries):" not in first_blob
-    assert "extra_col" in first_blob
+    assert "Relevant columns (use these for queries):" in first_blob
+    assert "city:" in first_blob
+    assert "score:" in first_blob
+    assert "extra_col" not in first_blob
 
 
 def test_analyze_query_without_hint_schema_context(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,6 +167,77 @@ def test_analyze_query_without_hint_schema_context(frame_data: DFrame, monkeypat
     assert "Relevant columns (use these for queries):" not in first_blob
 
 
+def test_analyze_query_with_empty_hint_has_no_full_schema(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent({"data": frame_data})
+    calls: list[list[dict[str, str]]] = []
+    responses = [
+        '{"queries":{"data":"df.head(2)"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        calls.append(messages)
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(agent.analyze("query", mode="query", columns_hint={"data": []}))
+
+    first_blob = "\n".join(msg["content"] for msg in calls[0] if msg["role"] == "system")
+    assert "Relevant columns (use these for queries): []" in first_blob
+    assert "extra_col" not in first_blob
+    assert "data" in result.query_errors
+    assert "No hinted columns available" in result.query_errors["data"]
+
+
+def test_analyze_query_with_all_invalid_hint_returns_explicit_error(
+    frame_data: DFrame,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = MultiFrameAgent({"data": frame_data})
+    responses = [
+        '{"queries":{"data":"df.head(2)"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(_messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(
+        agent.analyze(
+            "query",
+            mode="query",
+            columns_hint={"data": ["does_not_exist"]},
+        )
+    )
+
+    assert "data" in result.query_errors
+    assert "No hinted columns available" in result.query_errors["data"]
+
+
+def test_analyze_query_with_hint_restricts_queryable_columns(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = MultiFrameAgent({"data": frame_data})
+    responses = [
+        '{"queries":{"data":"df[[\'extra_col\']].head(2)"},"reasoning":"q"}',
+        '{"action":"analyze","analysis":"ok","insights":[],"operations":[]}',
+    ]
+
+    async def fake_call(messages: list[dict[str, str]]) -> str:
+        return responses.pop(0)
+
+    monkeypatch.setattr(agent, "_call_llm", fake_call)
+    result = asyncio.run(
+        agent.analyze(
+            "query",
+            mode="query",
+            columns_hint={"data": ["city", "score"]},
+        )
+    )
+
+    assert "data" in result.query_errors
+    assert "extra_col" in result.query_errors["data"]
+
+
 def test_columns_hint_partial_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     news = DFrame({"title": ["a", "b"], "city": ["jkt", "bdg"], "source": ["n1", "n2"]})
     social = DFrame({"content": ["x", "y"], "platform": ["ig", "x"], "region": ["jkt", "bdg"]})
@@ -185,7 +257,7 @@ def test_columns_hint_partial_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "## Sample (first" in context_blob
 
 
-def test_columns_hint_empty_list_fallback(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_columns_hint_empty_list_keeps_context_empty(frame_data: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = MultiFrameAgent({"data": frame_data})
     calls: list[list[dict[str, str]]] = []
 
@@ -197,8 +269,8 @@ def test_columns_hint_empty_list_fallback(frame_data: DFrame, monkeypatch: pytes
     _ = asyncio.run(agent.analyze("x", mode="sample", columns_hint={"data": []}))
 
     context_blob = "\n".join(msg["content"] for msg in calls[0] if msg["role"] == "system")
-    assert "showing_columns:" in context_blob
-    assert "extra_col" in context_blob
+    assert "showing_columns: []" in context_blob
+    assert "extra_col" not in context_blob
 
 
 def test_hint_context_smaller_than_full_context(frame_data: DFrame) -> None:

@@ -243,6 +243,43 @@ def test_stream_normalize_uses_only_target_frame_columns(monkeypatch) -> None:
     assert "country" not in blob
 
 
+def test_stream_normalize_with_context_columns_filters_snapshot(monkeypatch) -> None:
+    df = DFrame({"city": ["jakarta", "bandung"], "score": [10, 20], "country": ["ID", "ID"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def fake_llm_call(messages):
+        captured_messages.append(messages)
+        return []
+
+    async def fake_batch_enrich(items):
+        return {"written": 0, "skipped": len(items)}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    result = asyncio.run(
+        writer.stream_normalize(
+            "city",
+            fake_llm_call,
+            chunk_size=2,
+            context_columns=["score"],
+        )
+    )
+
+    assert result["total"] == 2
+    assert captured_messages
+    blob = "\n".join(msg["content"] for msg in captured_messages[0] if isinstance(msg, dict))
+    assert "city" in blob
+    assert "score" in blob
+    assert "country" not in blob
+
+
 def test_agent_add_row_writes_wal_and_extends_frame() -> None:
     df = DFrame({"city": ["jakarta"], "score": [10]})
     writer = AgentWriter(

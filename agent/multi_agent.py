@@ -263,6 +263,7 @@ class QueryExecutor:
         build_schema,
         safe_eval,
         fresh_frames: dict[str, "pd.DataFrame"] | None = None,
+        columns_hint: dict[str, list[str]] | None = None,
         max_retries: int = 3,
         max_result_rows: int = 200,
     ) -> None:
@@ -271,6 +272,7 @@ class QueryExecutor:
         self.build_schema = build_schema
         self.safe_eval = safe_eval
         self._fresh_frames = fresh_frames or {}
+        self._columns_hint = columns_hint
         self.max_retries = max_retries
         self.max_result_rows = max_result_rows
 
@@ -342,6 +344,26 @@ class QueryExecutor:
                     fresh = self._fresh_frames.get(label)
                     if fresh is None:
                         fresh = frame.read_fresh()
+                    hint_cols = self._columns_hint.get(label) if self._columns_hint else None
+                    if hint_cols is not None:
+                        allowed_cols = [col for col in hint_cols if col in fresh.columns]
+                        if not allowed_cols:
+                            error = (
+                                f"No hinted columns available for frame '{label}'. "
+                                f"Provided hints: {hint_cols}"
+                            )
+                            newly_failed.append({"label": label, "code": code, "error": error})
+                            errors[label] = error
+                            pending.discard(label)
+                            logger.warning(
+                                "QueryExecutor HINT_EMPTY: attempt=%d label=%s hints=%s",
+                                attempt + 1,
+                                label,
+                                hint_cols,
+                            )
+                            failed_labels.append(label)
+                            continue
+                        fresh = fresh[allowed_cols]
                     rewritten_code, applied_rewrites = _rewrite_generated_code(
                         code=code,
                         frame_label=label,
@@ -614,12 +636,13 @@ class MultiFrameAgent:
             frames=self._frames,
             call_llm=self._call_llm,
             build_schema=lambda: self._build_schema_context_with_samples(
-                use_hint=False,
+                use_hint=columns_hint is not None,
                 columns_hint=columns_hint,
                 fresh_frames=fresh_frames,
             ),
             safe_eval=self._safe_eval,
             fresh_frames=fresh_frames,
+            columns_hint=columns_hint,
             max_retries=QueryExecutor.MAX_RETRIES,
             max_result_rows=max_result_rows,
         )
@@ -679,7 +702,7 @@ class MultiFrameAgent:
         )
 
         schema_contexts = self._build_schema_context_with_samples(
-            use_hint=False,
+            use_hint=columns_hint is not None,
             columns_hint=columns_hint,
             fresh_frames=fresh_frames,
         )
@@ -779,6 +802,19 @@ class MultiFrameAgent:
                     fresh = fresh_frames.get(label) if fresh_frames is not None else None
                     if fresh is None:
                         fresh = frame.read_fresh()
+                    hint_cols = columns_hint.get(label) if columns_hint else None
+                    if hint_cols is not None:
+                        allowed_cols = [col for col in hint_cols if col in fresh.columns]
+                        if not allowed_cols:
+                            error = (
+                                f"No hinted columns available for frame '{label}'. "
+                                f"Provided hints: {hint_cols}"
+                            )
+                            new_errors[label] = error
+                            executed_this_attempt[label] = str(query_str)
+                            logger.warning("Query skipped by empty hint scope: frame=%s hints=%s", label, hint_cols)
+                            continue
+                        fresh = fresh[allowed_cols]
                     executed_query, applied_rewrites = _rewrite_generated_code(
                         code=str(query_str),
                         frame_label=label,
@@ -813,7 +849,7 @@ class MultiFrameAgent:
             }
             if column_key_errors and not reflection:
                 schema_ctx = self._build_schema_context(
-                    use_hint=False,
+                    use_hint=columns_hint is not None,
                     columns_hint=columns_hint,
                     fresh_frames=fresh_frames,
                 )
@@ -1080,22 +1116,17 @@ class MultiFrameAgent:
 
                 if not available_hints:
                     logger.warning(
-                        "_build_schema_context: no valid hint columns for frame '%s', "
-                        "falling back to full schema",
+                        "_build_schema_context: no valid hint columns for frame '%s'; "
+                        "using empty hinted schema",
                         label,
                     )
-                    parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+                    parts.append("\nRelevant columns (use these for queries): []")
                 else:
                     parts.append("\nRelevant columns (use these for queries):")
                     for col in available_hints:
                         dtype = fresh[col].dtype
                         n_unique = fresh[col].nunique(dropna=True)
                         parts.append(f"  {col}: {dtype} ({n_unique:,} unique values)")
-
-                    other_cols = [c for c in fresh.columns if c not in available_hints]
-                    if other_cols:
-                        parts.append("\nOther available columns (not selected for this analysis):")
-                        parts.append(f"  {other_cols}")
             else:
                 parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
 
@@ -1153,23 +1184,17 @@ class MultiFrameAgent:
                     )
                 if not available:
                     logger.warning(
-                        "_build_schema_context_with_samples: no valid hint columns for frame '%s', "
-                        "falling back to all columns",
+                        "_build_schema_context_with_samples: no valid hint columns for frame '%s'; "
+                        "using empty hinted schema",
                         label,
                     )
-                    available = list(fresh.columns)
-                    parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
+                    parts.append("\nRelevant columns (use these for queries): []")
                 else:
                     parts.append("\nRelevant columns (use these for queries):")
                     for col in available:
                         dtype = fresh[col].dtype
                         n_unique = fresh[col].nunique(dropna=True)
                         parts.append(f"  {col}: {dtype} ({n_unique:,} unique values)")
-
-                    other_cols = [col for col in fresh.columns if col not in available]
-                    if other_cols:
-                        parts.append("\nOther available columns (not selected for this analysis):")
-                        parts.append(f"  {other_cols}")
             else:
                 available = list(fresh.columns)
                 parts.append(f"\nColumn dtypes:\n{fresh.dtypes.to_string()}")
@@ -1226,11 +1251,10 @@ class MultiFrameAgent:
 
         if not available:
             logger.warning(
-                "_build_context_with_hint: no valid columns for frame '%s', "
-                "falling back to all columns",
+                "_build_context_with_hint: no valid columns for frame '%s'; "
+                "using empty hinted context",
                 label,
             )
-            available = list(fresh.columns)
 
         subset = fresh[available].head(max_rows)
 
@@ -1239,7 +1263,7 @@ class MultiFrameAgent:
             f"frame_id: {frame._frame_id}",
             f"total_rows: {len(fresh):,}",
             f"showing_columns: {available}",
-            "(other columns not shown - not relevant to instruction)",
+            "(only hinted columns are shown)",
             f"\nSample ({min(max_rows, len(fresh))} of {len(fresh):,} rows):",
             subset.to_string(index=True),
             "\nColumn types:",
