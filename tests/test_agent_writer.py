@@ -243,3 +243,57 @@ def test_stream_normalize_uses_only_target_frame_columns(monkeypatch) -> None:
     assert "country" not in blob
 
 
+def test_agent_add_row_writes_wal_and_extends_frame() -> None:
+    df = DFrame({"city": ["jakarta"], "score": [10]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    result = asyncio.run(writer.add_row({"city": "bandung", "score": 20}, confidence=0.95))
+
+    fresh = df.read_fresh()
+    assert result["written"] == 2
+    assert fresh.shape == (2, 2)
+    assert fresh.at[1, "city"] == "bandung"
+    assert int(fresh.at[1, "score"]) == 20
+    assert df._coordinator.wal._entries[-1].operations[0]["cell_id"].endswith("_1")
+
+
+def test_agent_drop_column_soft_deletes_with_wal() -> None:
+    df = DFrame({"city": ["jakarta", "bandung"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    result = asyncio.run(writer.drop_column("city", confidence=0.95))
+
+    fresh = df.read_fresh()
+    assert result["written"] == 2
+    assert fresh["city"].isna().all()
+    assert len(df._coordinator.wal._entries[-1].operations) == 2
+
+
+def test_agent_drop_row_soft_deletes_with_wal() -> None:
+    df = DFrame({"city": ["jakarta", "bandung"], "score": [10, 20]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    result = asyncio.run(writer.drop_row(0, confidence=0.95))
+
+    fresh = df.read_fresh()
+    assert result["written"] == 2
+    assert fresh.iloc[0].isna().all()
+    assert fresh.at[1, "city"] == "bandung"
+    assert int(fresh.at[1, "score"]) == 20
+
+

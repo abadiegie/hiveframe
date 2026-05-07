@@ -139,6 +139,102 @@ class AgentWriter:
 
         return ops, skipped
 
+    def _frame_local_snapshot(self):
+        """Build frame-local snapshot from write node for structural helpers."""
+        import pandas as pd
+
+        wn = self._coordinator.write_node
+        with wn._lock:
+            df_internal = wn._df
+            if self._frame_id is None:
+                return df_internal.copy().reset_index(drop=True)
+            prefix = f"{self._frame_id}::"
+            matching_cols = [c for c in df_internal.columns if c.startswith(prefix)]
+            if not matching_cols:
+                return pd.DataFrame()
+            df = df_internal[matching_cols].copy()
+            df.columns = [c[len(prefix):] for c in matching_cols]
+            return df.reset_index(drop=True)
+
+    async def add_row(self, values: dict[str, Any], confidence: float = 1.0) -> dict[str, Any]:
+        """Append one logical row by writing each provided column cell."""
+        if self._frame_id is None:
+            raise ValueError("add_row requires frame_id in AgentWriter")
+        if not values:
+            raise ValueError("add_row requires at least one column value")
+        snapshot = self._frame_local_snapshot()
+        row_idx = len(snapshot.index)
+        items = [
+            {
+                "cell_id": f"{self._frame_id}::{col}_{row_idx}",
+                "value": value,
+                "confidence": confidence,
+            }
+            for col, value in values.items()
+        ]
+        return await self.batch_enrich(items)
+
+    async def add_column(
+        self,
+        column: str,
+        values: list[Any] | None = None,
+        default: Any = None,
+        confidence: float = 1.0,
+    ) -> dict[str, Any]:
+        """Add or extend a column by writing values across row indexes."""
+        if self._frame_id is None:
+            raise ValueError("add_column requires frame_id in AgentWriter")
+        snapshot = self._frame_local_snapshot()
+        row_count = len(snapshot.index)
+        payload = list(values) if values is not None else [default] * row_count
+        if len(payload) < row_count:
+            payload.extend([default] * (row_count - len(payload)))
+        if not payload:
+            return {"written": 0, "skipped": 0, "skipped_cells": [], "tx_id": None, "success": False}
+        items = [
+            {
+                "cell_id": f"{self._frame_id}::{column}_{idx}",
+                "value": value,
+                "confidence": confidence,
+            }
+            for idx, value in enumerate(payload)
+        ]
+        return await self.batch_enrich(items)
+
+    async def drop_row(self, row_idx: int, confidence: float = 1.0) -> dict[str, Any]:
+        """Soft-delete one row by writing None to each column cell at row_idx."""
+        if self._frame_id is None:
+            raise ValueError("drop_row requires frame_id in AgentWriter")
+        snapshot = self._frame_local_snapshot()
+        if row_idx < 0 or row_idx >= len(snapshot.index):
+            return {"written": 0, "skipped": 0, "skipped_cells": [], "tx_id": None, "success": False}
+        items = [
+            {
+                "cell_id": f"{self._frame_id}::{col}_{row_idx}",
+                "value": None,
+                "confidence": confidence,
+            }
+            for col in snapshot.columns
+        ]
+        return await self.batch_enrich(items)
+
+    async def drop_column(self, column: str, confidence: float = 1.0) -> dict[str, Any]:
+        """Soft-delete one column by writing None to all existing rows."""
+        if self._frame_id is None:
+            raise ValueError("drop_column requires frame_id in AgentWriter")
+        snapshot = self._frame_local_snapshot()
+        if column not in snapshot.columns:
+            return {"written": 0, "skipped": 0, "skipped_cells": [], "tx_id": None, "success": False}
+        items = [
+            {
+                "cell_id": f"{self._frame_id}::{column}_{idx}",
+                "value": None,
+                "confidence": confidence,
+            }
+            for idx in range(len(snapshot.index))
+        ]
+        return await self.batch_enrich(items)
+
     async def normalize(self, cell_id: str, new_value: Any, confidence: float) -> dict:
         """Write one normalization result. Returns result summary."""
         logger.debug(
