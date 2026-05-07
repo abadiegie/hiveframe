@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import io
 import math
 
 import pandas as pd
@@ -181,6 +182,131 @@ def test_from_excel_lazy_hyperlink_error_without_calamine_shows_guidance(monkeyp
 
     with pytest.raises(RuntimeError, match="python-calamine"):
         asyncio.run(DFrame.from_excel_lazy(str(path), chunk_size=1))
+
+
+def test_from_excel_lazy_remote_s3_uses_fsspec_stream(monkeypatch) -> None:
+    class _FakeWorksheet:
+        def iter_rows(self, values_only=True):
+            _ = values_only
+            yield ("name", "age")
+            yield ("a", 1)
+            yield ("b", 2)
+
+    class _FakeWorkbook:
+        def __init__(self) -> None:
+            self.worksheets = [_FakeWorksheet()]
+
+        def __getitem__(self, _sheet_name):
+            return self.worksheets[0]
+
+        def close(self) -> None:
+            return None
+
+    class _FakeOpenPyXL:
+        calls: list[object] = []
+
+        @staticmethod
+        def load_workbook(source, **_kwargs):
+            _FakeOpenPyXL.calls.append(source)
+            return _FakeWorkbook()
+
+    class _FakeFsspecOpen:
+        def __enter__(self):
+            return io.BytesIO(b"fake-bytes")
+
+        def __exit__(self, exc_type, exc, tb):
+            _ = (exc_type, exc, tb)
+            return False
+
+    class _FakeFsspec:
+        calls: list[tuple[str, str, dict]] = []
+
+        @staticmethod
+        def open(path, mode, **kwargs):
+            _FakeFsspec.calls.append((path, mode, dict(kwargs)))
+            return _FakeFsspecOpen()
+
+    monkeypatch.setitem(__import__("sys").modules, "openpyxl", _FakeOpenPyXL)
+    monkeypatch.setitem(__import__("sys").modules, "fsspec", _FakeFsspec)
+
+    loaded = asyncio.run(
+        DFrame.from_excel_lazy(
+            "s3://bucket/sample.xlsx",
+            chunk_size=1,
+            storage_options={"anon": True, "endpoint_url": "http://127.0.0.1:9000"},
+        )
+    )
+    fresh = loaded.read_fresh()
+
+    assert fresh.shape == (2, 2)
+    assert fresh.iloc[0]["name"] == "a"
+    assert int(fresh.iloc[1]["age"]) == 2
+    assert _FakeFsspec.calls
+    assert _FakeFsspec.calls[0][0] == "s3://bucket/sample.xlsx"
+    assert _FakeFsspec.calls[0][1] == "rb"
+    assert _FakeFsspec.calls[0][2]["anon"] is True
+    assert _FakeOpenPyXL.calls
+    assert hasattr(_FakeOpenPyXL.calls[0], "read")
+
+
+def test_from_excel_lazy_remote_fallback_forwards_storage_options(monkeypatch) -> None:
+    class _FakeWorksheet:
+        def iter_rows(self, values_only=True):
+            _ = values_only
+            raise TypeError("Hyperlink.__init__() got an unexpected keyword argument 'address'")
+
+    class _FakeWorkbook:
+        def __init__(self) -> None:
+            self.worksheets = [_FakeWorksheet()]
+
+        def __getitem__(self, _sheet_name):
+            return self.worksheets[0]
+
+        def close(self) -> None:
+            return None
+
+    class _FakeOpenPyXL:
+        @staticmethod
+        def load_workbook(*_args, **_kwargs):
+            return _FakeWorkbook()
+
+    class _FakeFsspecOpen:
+        def __enter__(self):
+            return io.BytesIO(b"fake-bytes")
+
+        def __exit__(self, exc_type, exc, tb):
+            _ = (exc_type, exc, tb)
+            return False
+
+    class _FakeFsspec:
+        @staticmethod
+        def open(_path, _mode, **_kwargs):
+            return _FakeFsspecOpen()
+
+    monkeypatch.setitem(__import__("sys").modules, "openpyxl", _FakeOpenPyXL)
+    monkeypatch.setitem(__import__("sys").modules, "fsspec", _FakeFsspec)
+
+    fallback_df = pd.DataFrame({"name": ["a"], "age": [1]})
+    called: dict[str, object] = {}
+
+    def _fake_read_excel(*_args, **kwargs):
+        called.update(kwargs)
+        return fallback_df.copy()
+
+    monkeypatch.setattr(pd, "read_excel", _fake_read_excel)
+
+    loaded = asyncio.run(
+        DFrame.from_excel_lazy(
+            "s3://bucket/fallback.xlsx",
+            chunk_size=1,
+            storage_options={"anon": True, "endpoint_url": "http://127.0.0.1:9000"},
+        )
+    )
+    fresh = loaded.read_fresh()
+
+    assert fresh.shape == (1, 2)
+    assert called.get("engine") == "calamine"
+    assert called.get("storage_options") == {"anon": True, "endpoint_url": "http://127.0.0.1:9000"}
 
 
 def test_lazy_same_result_as_eager(tmp_path) -> None:

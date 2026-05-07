@@ -250,6 +250,7 @@ class DFrame:
         distribute: bool = False,
         runtime: "ClusterRuntime | None" = None,
         transactional: bool = True,
+        storage_options: dict[str, Any] | None = None,
     ) -> "DFrame":
         """Load Excel lazily using openpyxl read-only stream (memory O(chunk_size))."""
         coordinator = runtime.coordinator if runtime is not None else None
@@ -264,6 +265,8 @@ class DFrame:
             raise ValueError("from_excel_lazy(distribute=True) requires a runtime")
 
         def _iter_excel_chunks() -> Iterable[pd.DataFrame]:
+            remote_source = "://" in path and not path.startswith("file://")
+
             try:
                 from openpyxl import load_workbook
             except ImportError as exc:
@@ -271,9 +274,8 @@ class DFrame:
                     "openpyxl is required for from_excel_lazy(). Install with: pip install hiveframe[excel]"
                 ) from exc
 
-            wb = load_workbook(str(path), read_only=True, data_only=True)
-            try:
-                ws = wb.worksheets[sheet_name] if isinstance(sheet_name, int) else wb[sheet_name]
+            def _yield_from_workbook(wb_obj: Any) -> Iterable[pd.DataFrame]:
+                ws = wb_obj.worksheets[sheet_name] if isinstance(sheet_name, int) else wb_obj[sheet_name]
                 headers: list[str] | None = None
                 buffer: list[dict[str, Any]] = []
 
@@ -288,7 +290,30 @@ class DFrame:
 
                 if buffer:
                     yield pd.DataFrame(buffer)
-                return
+
+            try:
+                if remote_source:
+                    try:
+                        import fsspec
+                    except ImportError as exc:
+                        raise ImportError(
+                            "from_excel_lazy remote URLs require fsspec (and s3fs for s3/minio). "
+                            "Install with: pip install fsspec s3fs"
+                        ) from exc
+                    with fsspec.open(path, "rb", **(storage_options or {})) as stream:
+                        wb = load_workbook(stream, read_only=True, data_only=True)
+                        try:
+                            yield from _yield_from_workbook(wb)
+                            return
+                        finally:
+                            wb.close()
+                else:
+                    wb = load_workbook(str(path), read_only=True, data_only=True)
+                    try:
+                        yield from _yield_from_workbook(wb)
+                        return
+                    finally:
+                        wb.close()
             except TypeError as exc:
                 message = str(exc)
                 if "Hyperlink.__init__()" not in message or "address" not in message:
@@ -297,12 +322,16 @@ class DFrame:
                     "from_excel_lazy: openpyxl read_only parser failed (%s), using pandas fallback",
                     exc,
                 )
-            finally:
-                wb.close()
 
             # Fallback path for known read_only hyperlink parsing issue.
             try:
-                fallback_df = pd.read_excel(path, sheet_name=sheet_name, engine="calamine")
+                read_excel_kwargs: dict[str, Any] = {
+                    "sheet_name": sheet_name,
+                    "engine": "calamine",
+                }
+                if remote_source and storage_options:
+                    read_excel_kwargs["storage_options"] = storage_options
+                fallback_df = pd.read_excel(path, **read_excel_kwargs)
             except Exception as fallback_exc:
                 raise RuntimeError(
                     "from_excel_lazy fallback failed after openpyxl hyperlink parse error. "
