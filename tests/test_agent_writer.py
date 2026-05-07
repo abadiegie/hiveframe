@@ -334,3 +334,69 @@ def test_agent_drop_row_soft_deletes_with_wal() -> None:
     assert int(fresh.at[1, "score"]) == 20
 
 
+def test_stream_normalize_chunk_row_indices_are_absolute(monkeypatch) -> None:
+    """Second chunk must receive row numbers starting at chunk_size, not 0."""
+    df = DFrame({"city": ["jakarta", "bandung", "surabaya", "medan"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def fake_llm_call(messages):
+        captured_messages.append(messages)
+        return []
+
+    async def fake_batch_enrich(items):
+        return {"written": 0, "skipped": len(items)}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=2))
+
+    assert len(captured_messages) == 2
+
+    # First chunk: rows 0-1
+    first_blob = "\n".join(m["content"] for m in captured_messages[0] if isinstance(m, dict))
+    assert "0 to 1" in first_blob
+
+    # Second chunk: rows 2-3, NOT 0-1
+    second_blob = "\n".join(m["content"] for m in captured_messages[1] if isinstance(m, dict))
+    assert "2 to 3" in second_blob
+    # Row 0 must not appear as a range header in the second chunk prompt
+    assert "0 to 1" not in second_blob
+
+
+def test_stream_normalize_snapshot_shows_absolute_indices(monkeypatch) -> None:
+    """Snapshot table in second chunk must show row 2, 3 not 0, 1."""
+    df = DFrame({"city": ["jakarta", "bandung", "surabaya", "medan"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def fake_llm_call(messages):
+        captured_messages.append(messages)
+        return []
+
+    async def fake_batch_enrich(items):
+        return {"written": 0, "skipped": len(items)}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=2))
+
+    second_blob = "\n".join(m["content"] for m in captured_messages[1] if isinstance(m, dict))
+    # The data table must show rows 2 and 3 with the actual city values
+    assert "surabaya" in second_blob
+    assert "medan" in second_blob
+    # pandas to_string shows the index column — must be 2 and 3
+    assert "2 " in second_blob or "\n2" in second_blob
+    assert "3 " in second_blob or "\n3" in second_blob

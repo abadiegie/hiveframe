@@ -427,6 +427,9 @@ class AgentWriter:
 
         for chunk_idx, start in enumerate(range(0, total, chunk_size)):
             end = min(start + chunk_size, total)
+            # After reset_index(drop=True) above, df index is 0..total-1.
+            # iloc[start:end] preserves absolute indices (start..end-1),
+            # so to_string() shows the correct row numbers for cell_id generation.
             chunk = df.iloc[start:end]
 
             logger.debug(
@@ -448,7 +451,9 @@ class AgentWriter:
                 if column not in selected_cols:
                     selected_cols.insert(0, column)
 
-            snapshot = chunk[selected_cols].to_string()
+            # Use absolute row indices so LLM generates correct cell_ids.
+            # chunk.index already holds 0-based positions from reset_index above.
+            snapshot = chunk[selected_cols].to_string(index=True)
 
             logger.debug(
                 "stream_normalize CONTEXT: chunk %d snapshot_lines=%d columns=%s",
@@ -466,6 +471,7 @@ class AgentWriter:
                 column_name=column,
                 chunk_start=start,
                 context_columns=selected_cols,
+                chunk_row_count=len(chunk),
             )
 
             logger.debug(

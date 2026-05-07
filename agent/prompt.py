@@ -860,6 +860,7 @@ def build_normalize_messages(
     column_name: str,
     chunk_start: int,
     context_columns: list[str] | None = None,
+    chunk_row_count: int | None = None,
 ) -> list[dict[str, str]]:
     """
     Build LLM messages for stream_normalize with context awareness.
@@ -894,8 +895,9 @@ def build_normalize_messages(
         f"\n## Target Information\n\n"
         f"Frame ID: `{frame_id}`\n"
         f"Column: `{column_name}`\n"
-        f"Chunk rows: {chunk_start}-{chunk_start + (chunk_snapshot.count(chr(10)))} "
-        f"(0-based indexing)",
+        f"Row index range in this chunk: {chunk_start} to "
+        f"{chunk_start + (chunk_row_count - 1 if chunk_row_count else max(0, chunk_snapshot.count(chr(10)) - 1))} "
+        f"(0-based, these are the exact row numbers to use in cell_ids)",
     ]
 
     if context_columns:
