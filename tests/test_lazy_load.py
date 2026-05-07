@@ -104,6 +104,43 @@ def test_from_excel_lazy_progress_callback(tmp_path) -> None:
     assert progress == [80, 160, 205]
 
 
+def test_from_excel_lazy_falls_back_on_hyperlink_address_parse_error(monkeypatch, tmp_path) -> None:
+    class _FakeWorksheet:
+        def iter_rows(self, values_only=True):
+            _ = values_only
+            raise TypeError("Hyperlink.__init__() got an unexpected keyword argument 'address'")
+
+    class _FakeWorkbook:
+        def __init__(self) -> None:
+            self.worksheets = [_FakeWorksheet()]
+
+        def __getitem__(self, _sheet_name):
+            return self.worksheets[0]
+
+        def close(self) -> None:
+            return None
+
+    class _FakeOpenPyXL:
+        @staticmethod
+        def load_workbook(*_args, **_kwargs):
+            return _FakeWorkbook()
+
+    monkeypatch.setitem(__import__("sys").modules, "openpyxl", _FakeOpenPyXL)
+
+    fallback_df = pd.DataFrame({"name": ["a", "b"], "age": [1, 2]})
+    monkeypatch.setattr(pd, "read_excel", lambda *args, **kwargs: fallback_df.copy())
+
+    path = tmp_path / "broken_hyperlink.xlsx"
+    path.write_bytes(b"placeholder")
+
+    loaded = asyncio.run(DFrame.from_excel_lazy(str(path), chunk_size=1))
+    fresh = loaded.read_fresh()
+
+    assert fresh.shape == (2, 2)
+    assert fresh.iloc[0]["name"] == "a"
+    assert int(fresh.iloc[1]["age"]) == 2
+
+
 def test_lazy_same_result_as_eager(tmp_path) -> None:
     path = tmp_path / "same.csv"
     source = pd.DataFrame({"city": ["a", "b", "c"], "score": [10, 20, 30]})

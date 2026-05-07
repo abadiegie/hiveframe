@@ -288,8 +288,22 @@ class DFrame:
 
                 if buffer:
                     yield pd.DataFrame(buffer)
+                return
+            except TypeError as exc:
+                message = str(exc)
+                if "Hyperlink.__init__()" not in message or "address" not in message:
+                    raise
+                logger.warning(
+                    "from_excel_lazy: openpyxl read_only parser failed (%s), using pandas fallback",
+                    exc,
+                )
             finally:
                 wb.close()
+
+            # Fallback path for known read_only hyperlink parsing issue.
+            fallback_df = pd.read_excel(path, sheet_name=sheet_name)
+            for start in range(0, len(fallback_df), chunk_size):
+                yield fallback_df.iloc[start:start + chunk_size].copy()
 
         if distribute and runtime is not None:
             iterator = iter(_iter_excel_chunks())
