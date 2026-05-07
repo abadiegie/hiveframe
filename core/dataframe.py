@@ -301,7 +301,13 @@ class DFrame:
                 wb.close()
 
             # Fallback path for known read_only hyperlink parsing issue.
-            fallback_df = pd.read_excel(path, sheet_name=sheet_name)
+            try:
+                fallback_df = pd.read_excel(path, sheet_name=sheet_name, engine="calamine")
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "from_excel_lazy fallback failed after openpyxl hyperlink parse error. "
+                    "Install calamine support (pip install python-calamine) or re-save the workbook."
+                ) from fallback_exc
             for start in range(0, len(fallback_df), chunk_size):
                 yield fallback_df.iloc[start:start + chunk_size].copy()
 

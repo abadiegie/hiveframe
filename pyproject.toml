@@ -52,6 +52,7 @@ benchmark = [
 ]
 excel = [
     "openpyxl>=3.1",
+    "python-calamine>=0.2",
 ]
 redis = [
     "redis>=5.0",
@@ -61,6 +62,7 @@ mysql = [
 ]
 all = [
     "openpyxl>=3.1",
+    "python-calamine>=0.2",
     "nats-py>=2.7",
     "aioquic>=1.2",
     "redis>=5.0",

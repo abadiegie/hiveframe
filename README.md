@@ -148,7 +148,7 @@ For full cluster setup including TCP/QUIC transport and SQLite/NATS registry, se
 ## Install extras
 
 ```bash
-pip install hiveframe[excel]      # Excel import/export (openpyxl)
+pip install hiveframe[excel]      # Excel import/export (openpyxl + calamine fallback)
 pip install hiveframe[nats]       # NATS registry backend
 pip install hiveframe[quic]       # QUIC transport
 pip install hiveframe[redis]      # Redis-backed WAL backend (optional, multi-user)
