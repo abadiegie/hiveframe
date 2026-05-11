@@ -108,25 +108,80 @@ def parse_plan(response_text: str) -> dict[str, Any]:
     """
     import json
     import re
-    # 1. Try direct parse (raw JSON — most mock and well-behaved LLMs)
+
+    text = (response_text or "").strip()
+    if not text:
+        return {}
+
+    # 1. Try direct parse first (best case: raw JSON only)
     try:
-        return json.loads(response_text.strip())
+        return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         pass
-    # 2. Try ```json ... ``` code fence
-    match = re.search(r"```json\s*([\s\S]*?)\s*```", response_text)
-    if match:
+
+    # 2. Try fenced code blocks (`json` and generic fences)
+    for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE):
+        candidate = match.group(1).strip()
+        if not candidate:
+            continue
         try:
-            return json.loads(match.group(1))
+            return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
-            pass
-    # 3. Try first { ... } block
-    match = re.search(r"{[\s\S]*}", response_text)
-    if match:
+            continue
+
+    # 3. Scan for balanced JSON objects/arrays embedded in prose.
+    # This is more robust than greedy regex when the model adds extra text.
+    def _extract_balanced(source: str, start: int) -> int | None:
+        opening = source[start]
+        if opening not in "[{":
+            return None
+        matching = {"{": "}", "[": "]"}
+        stack: list[str] = []
+        in_string = False
+        escaped = False
+
+        for idx in range(start, len(source)):
+            ch = source[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch in "[{":
+                stack.append(ch)
+                continue
+
+            if ch in "]}":
+                if not stack:
+                    return None
+                opener = stack.pop()
+                if matching[opener] != ch:
+                    return None
+                if not stack:
+                    return idx + 1
+
+        return None
+
+    for idx, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        end = _extract_balanced(text, idx)
+        if end is None:
+            continue
+        candidate = text[idx:end]
         try:
-            return json.loads(match.group(0))
+            return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
-            pass
+            continue
+
     return {}
 
 

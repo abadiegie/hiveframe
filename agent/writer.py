@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in packaged installs
     # Installed package import (hiveframe.core)
     from hiveframe.core.coordinator import TransactionCoordinator
     from hiveframe.core.transaction import Operation, TxState
-from ._llm_debug import summarize_messages, summarize_operations
+from ._llm_debug import summarize_messages, summarize_operations, truncate_text
 
 
 logger = logging.getLogger("hiveframe.agent.writer")
@@ -342,10 +342,44 @@ class AgentWriter:
         ops, _ = self._build_operations([item])
         return ops[0] if ops else None
 
+    @staticmethod
+    def _extract_stream_normalize_result(
+        result: Any,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Normalize llm_call output into operations + optional raw response text.
+
+        Backward-compatible accepted shapes:
+        - list[dict]: parsed operations only
+        - str: raw JSON response text, parsed with parse_plan()
+        - dict: {"operations": [...], "raw_response_text": "..."}
+        """
+        if isinstance(result, list):
+            return result, None
+
+        if isinstance(result, str):
+            from .prompt import parse_plan
+
+            plan = parse_plan(result)
+            operations = plan.get("operations", []) if isinstance(plan, dict) else []
+            return list(operations) if isinstance(operations, list) else [], result
+
+        if isinstance(result, dict):
+            raw_response = result.get("raw_response_text")
+            if raw_response is None:
+                raw_response = result.get("raw_response")
+            if raw_response is None:
+                raw_response = result.get("raw")
+            operations = result.get("operations", [])
+            if not isinstance(operations, list):
+                operations = []
+            return operations, str(raw_response) if raw_response is not None else None
+
+        return [], str(result) if result is not None else None
+
     async def stream_normalize(
         self,
         column: str,
-        llm_call: Callable[[list[dict]], Awaitable[list[dict]]],
+        llm_call: Callable[[list[dict]], Awaitable[Any]],
         chunk_size: int = 50,
         progress_callback: Optional[Callable[[int, int], None]] = None,
         custom_instruction: str | None = None,
@@ -358,7 +392,10 @@ class AgentWriter:
 
         Args:
             column: Public column name to normalize.
-            llm_call: Async function(messages) -> list of write operations.
+            llm_call: Async function(messages) returning one of:
+                      - list of write operations
+                      - raw JSON response text
+                      - dict with "operations" and optional "raw_response_text"
             chunk_size: Number of rows sent per LLM call.
             progress_callback: Optional callback(processed, total).
             custom_instruction: Optional custom instruction for normalization rule.
@@ -483,13 +520,26 @@ class AgentWriter:
 
             # Call LLM for this chunk
             try:
-                ops = await llm_call(messages)
+                llm_result = await llm_call(messages)
+                ops, raw_response_text = self._extract_stream_normalize_result(llm_result)
                 logger.debug(
                     "stream_normalize LLM_RESPONSE: chunk %d operations=%d preview=%s",
                     chunk_idx + 1,
                     len(ops) if ops else 0,
                     summarize_operations(ops or []),
                 )
+                if raw_response_text is not None:
+                    logger.debug(
+                        "stream_normalize LLM_RAW_RESPONSE: chunk %d chars=%d preview=%s",
+                        chunk_idx + 1,
+                        len(raw_response_text),
+                        truncate_text(raw_response_text, limit=700),
+                    )
+                    logger.debug(
+                        "stream_normalize LLM_RAW_RESPONSE_FULL: chunk %d raw=%s",
+                        chunk_idx + 1,
+                        raw_response_text,
+                    )
             except Exception as exc:
                 logger.error(
                     "stream_normalize LLM_ERROR: chunk %d error=%s",

@@ -143,6 +143,70 @@ def test_stream_normalize_logs_llm_debug(monkeypatch, caplog):
     assert "Jakarta" in caplog.text
 
 
+def test_stream_normalize_logs_full_raw_llm_response(monkeypatch, caplog):
+    df = DFrame({"city": ["jakarta"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    raw_response = (
+        '{"action":"batch_enrich","reasoning":"normalize city",'
+        f'"operations":[{{"cell_id":"{df._frame_id}::city_0","value":"Jakarta","confidence":0.95}}]}}'
+    )
+
+    async def fake_llm_call(_messages):
+        return {
+            "operations": [{
+                "cell_id": f"{df._frame_id}::city_0",
+                "value": "Jakarta",
+                "confidence": 0.95,
+            }],
+            "raw_response_text": raw_response,
+        }
+
+    async def fake_batch_enrich(items):
+        return {"written": len(items), "skipped": 0}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+    caplog.set_level(logging.DEBUG, logger="hiveframe.agent.writer")
+
+    asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=1))
+
+    assert "stream_normalize LLM_RAW_RESPONSE" in caplog.text
+    assert "stream_normalize LLM_RAW_RESPONSE_FULL" in caplog.text
+    assert raw_response in caplog.text
+
+
+def test_stream_normalize_accepts_raw_json_string_response(monkeypatch):
+    df = DFrame({"city": ["jakarta"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    async def fake_llm_call(_messages):
+        return (
+            '{"action":"batch_enrich","reasoning":"normalize city",'
+            f'"operations":[{{"cell_id":"{df._frame_id}::city_0","value":"Jakarta","confidence":0.95}}]}}'
+        )
+
+    async def fake_batch_enrich(items):
+        return {"written": len(items), "skipped": 0}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    result = asyncio.run(writer.stream_normalize("city", fake_llm_call, chunk_size=1))
+
+    assert result["written"] == 1
+    assert result["skipped"] == 0
+    assert result["total"] == 1
+
+
 def test_normalize_low_confidence_is_skipped() -> None:
     df = DFrame({"city": ["jakarta"]})
     writer = AgentWriter(

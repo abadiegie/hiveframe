@@ -115,4 +115,28 @@ def test_list_json_returns_non_empty_list() -> None:
     assert isinstance(result, list)
 
 
+def test_generic_fenced_block_without_json_tag() -> None:
+    raw = '```\n{"action":"batch_enrich","operations":[]}\n```'
+    result = parse_plan(raw)
+    assert result["action"] == "batch_enrich"
+
+
+def test_embedded_json_with_trailing_braces_in_text() -> None:
+    raw = (
+        "Sure, here is the result:\n"
+        '{"action":"batch_enrich","operations":[{"cell_id":"f::c_0","value":"x","confidence":0.9}]}\n'
+        "Note: ignore placeholder {not_json}"
+    )
+    result = parse_plan(raw)
+    assert result.get("action") == "batch_enrich"
+    assert len(result.get("operations", [])) == 1
+
+
+def test_embedded_json_array_in_prose() -> None:
+    raw = "Result payload: [{\"action\":\"batch_enrich\"}] thanks"
+    result = parse_plan(raw)
+    assert isinstance(result, list)
+    assert result[0]["action"] == "batch_enrich"
+
+
 
