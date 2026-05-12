@@ -589,3 +589,73 @@ class AgentWriter:
         )
 
         return {"written": written, "skipped": skipped, "total": total}
+
+    async def stream_normalize_many(
+        self,
+        columns: list[str],
+        llm_call: Callable[[list[dict]], Awaitable[Any]],
+        chunk_size: int = 50,
+        instructions: dict[str, str] | None = None,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        context_columns: list[str] | None = None,
+    ) -> dict[str, dict]:
+        """Normalize multiple columns sequentially, each with its own LLM pass.
+
+        Args:
+            columns: List of column names to normalize.
+            llm_call: Async function(messages) — same contract as stream_normalize.
+            chunk_size: Rows per LLM call.
+            instructions: Optional per-column instructions keyed by column name.
+                          Falls back to generic "Normalize column '<name>'" when absent.
+            progress_callback: Optional callback(column, processed, total).
+            context_columns: Passed through to each stream_normalize call.
+
+        Returns:
+            Dict keyed by column name, each value is the result dict from stream_normalize
+            ({"written": int, "skipped": int, "total": int}).
+
+        Example::
+
+            results = await writer.stream_normalize_many(
+                columns=["city", "province", "country"],
+                llm_call=my_llm_call,
+                instructions={
+                    "city": "Standardize to proper Indonesian city names",
+                    "province": "Standardize to official Indonesian province names",
+                },
+            )
+        """
+        if not columns:
+            raise ValueError("columns must not be empty")
+
+        results: dict[str, dict] = {}
+        for col in columns:
+            instruction = (instructions or {}).get(col)
+            col_callback = None
+            if progress_callback:
+                col_callback = lambda processed, total, _col=col: progress_callback(_col, processed, total)  # noqa: E731
+            results[col] = await self.stream_normalize(
+                column=col,
+                llm_call=llm_call,
+                chunk_size=chunk_size,
+                progress_callback=col_callback,
+                custom_instruction=instruction,
+                context_columns=context_columns,
+            )
+            logger.info(
+                "stream_normalize_many COLUMN_DONE: column=%s written=%d skipped=%d",
+                col,
+                results[col].get("written", 0),
+                results[col].get("skipped", 0),
+            )
+
+        total_written = sum(r.get("written", 0) for r in results.values())
+        total_skipped = sum(r.get("skipped", 0) for r in results.values())
+        logger.info(
+            "stream_normalize_many FINISHED: columns=%d total_written=%d total_skipped=%d",
+            len(columns),
+            total_written,
+            total_skipped,
+        )
+        return results
+

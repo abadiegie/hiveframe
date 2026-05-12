@@ -111,6 +111,93 @@ class ReviewVerdict:
 
 
 @dataclass
+class ColumnProfile:
+    """Statistical profile untuk satu column."""
+
+    column_name: str
+    dtype: str
+    null_count: int
+    null_pct: float
+    unique_count: int
+    is_numeric: bool
+    is_categorical: bool
+    is_temporal: bool
+
+    # Numeric statistics
+    min: float | None = None
+    max: float | None = None
+    mean: float | None = None
+    median: float | None = None
+    std: float | None = None
+
+    # Categorical top values: [(value, count), ...]
+    top_values: list[tuple[str, int]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-friendly dict."""
+        return {
+            "column_name": self.column_name,
+            "dtype": self.dtype,
+            "null_count": self.null_count,
+            "null_pct": round(self.null_pct, 4),
+            "unique_count": self.unique_count,
+            "is_numeric": self.is_numeric,
+            "is_categorical": self.is_categorical,
+            "is_temporal": self.is_temporal,
+            "min": self.min,
+            "max": self.max,
+            "mean": round(self.mean, 4) if self.mean is not None else None,
+            "median": round(self.median, 4) if self.median is not None else None,
+            "std": round(self.std, 4) if self.std is not None else None,
+            "top_values": [{"value": str(v), "count": int(c)} for v, c in self.top_values],
+        }
+
+
+@dataclass
+class FrameProfile:
+    """Complete statistical profile untuk satu frame."""
+
+    frame_label: str
+    row_count: int
+    col_count: int
+    columns: dict[str, ColumnProfile]
+
+    # Top aggregations auto-detected
+    # Format: {"group_column": [{"value": "A", "count": 10, "pct": 0.15}, ...]}
+    top_groupby_results: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-friendly dict."""
+        return {
+            "frame_label": self.frame_label,
+            "row_count": self.row_count,
+            "col_count": self.col_count,
+            "columns": {k: v.to_dict() for k, v in self.columns.items()},
+            "top_groupby_results": self.top_groupby_results,
+        }
+
+
+@dataclass
+class AggregationSnapshot:
+    """Auto-generated aggregation snapshot dari frame."""
+
+    frame_label: str
+    aggregation_column: str
+    aggregation_type: str  # "value_counts", "groupby", "describe"
+    data: list[dict[str, Any]]  # [{"value": "A", "count": 10}, ...]
+    title: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "frame_label": self.frame_label,
+            "aggregation_column": self.aggregation_column,
+            "aggregation_type": self.aggregation_type,
+            "data": self.data,
+            "title": self.title,
+        }
+
+
+@dataclass
 class MultiFrameResult:
     """Result returned by ``MultiFrameAgent.analyze()``."""
 
@@ -130,6 +217,10 @@ class MultiFrameResult:
     series: list[SeriesSpec] = field(default_factory=list)
     fallback_reason: str = ""
     attempt_summaries: list[dict[str, Any]] = field(default_factory=list)
+
+    # NEW: Comprehensive profiling data
+    frame_profiles: dict[str, FrameProfile] = field(default_factory=dict)
+    aggregation_snapshots: list[AggregationSnapshot] = field(default_factory=list)
 
     def get_series(self, name: str) -> SeriesSpec | None:
         """Get a SeriesSpec by label/name."""
@@ -153,6 +244,50 @@ class MultiFrameResult:
         """Render the result as a markdown report."""
 
         parts: list[str] = []
+
+        # Frame profiles section
+        if self.frame_profiles:
+            parts.append("## 📊 Data Overview\n")
+            for label, profile in self.frame_profiles.items():
+                parts.append(f"### {label}\n")
+                parts.append(f"- **Shape:** {profile.row_count:,} rows × {profile.col_count} columns")
+
+                # Data quality indicators
+                null_cols = [
+                    (col_name, col_prof.null_pct)
+                    for col_name, col_prof in profile.columns.items()
+                    if col_prof.null_pct > 0.1
+                ]
+                if null_cols:
+                    parts.append("- **Data Quality Issues:**")
+                    for col_name, null_pct in sorted(null_cols, key=lambda x: -x[1])[:5]:
+                        parts.append(f"  - `{col_name}`: {null_pct:.1%} null")
+
+                # Key statistics
+                numeric_cols = [
+                    (col_name, col_prof)
+                    for col_name, col_prof in profile.columns.items()
+                    if col_prof.is_numeric
+                ]
+                if numeric_cols:
+                    parts.append("- **Numeric Columns:**")
+                    for col_name, col_prof in numeric_cols[:5]:
+                        parts.append(f"  - `{col_name}`: μ={col_prof.mean:.2f}, σ={col_prof.std:.2f}, range=[{col_prof.min}, {col_prof.max}]")
+
+                parts.append("")
+
+        # Aggregation snapshots
+        if self.aggregation_snapshots:
+            parts.append("## 📈 Aggregation Snapshots\n")
+            for snap in self.aggregation_snapshots:
+                parts.append(f"### {snap.frame_label} - {snap.aggregation_column}\n")
+                if isinstance(snap.data, list) and snap.data:
+                    for item in snap.data[:15]:
+                        value_str = str(item.get("value", "?"))
+                        count = item.get("count", 0)
+                        pct = item.get("pct", 0)
+                        parts.append(f"- {value_str}: {count} ({pct:.1%})")
+                parts.append("")
 
         if self.analysis:
             parts.append(f"## Analysis\n\n{self.analysis}")

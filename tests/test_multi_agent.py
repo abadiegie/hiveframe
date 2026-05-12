@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from agent.multi_agent import MultiFrameAgent, _rewrite_generated_code
+from agent.prompt import build_analysis_messages, build_multi_frame_messages
 from agent.result import FrameInsight, MultiFrameResult
 from core.dataframe import DFrame
 
@@ -216,6 +217,33 @@ def test_analyze_sample_reuses_single_snapshot_per_frame(monkeypatch: pytest.Mon
 
     assert result.analysis == "ok"
     assert reads["count"] == 1
+
+
+def test_build_multi_frame_messages_requests_structured_non_repetitive_analysis(frame_sales: DFrame) -> None:
+    messages = build_multi_frame_messages(
+        instruction="Summarize the dataset",
+        frame_contexts={"sales": frame_sales.describe_for_agent(max_rows=5, include_schema=True, include_stats=True)},
+    )
+
+    system_blob = "\n".join(msg["content"] for msg in messages if msg["role"] == "system")
+    assert "Overall summary" in system_blob
+    assert "Key findings as distinct bullet points" in system_blob
+    assert "Avoid repeating the same observation" in system_blob
+    assert "Use both the sample rows and any statistics" in system_blob
+
+
+def test_build_analysis_messages_requests_structured_non_repetitive_analysis(frame_sales: DFrame) -> None:
+    messages = build_analysis_messages(
+        instruction="Summarize the query results",
+        query_results={"sales": frame_sales.read_fresh().to_string()},
+        query_errors={},
+        original_queries={"sales": "df.head(5)"},
+    )
+
+    system_blob = "\n".join(msg["content"] for msg in messages if msg["role"] == "system")
+    assert "Overall summary" in system_blob
+    assert "Key findings as distinct bullet points" in system_blob
+    assert "do not repeat the same point in multiple sentences" in system_blob
 
 
 def test_analyze_query_two_llm_calls(frame_sales: DFrame, monkeypatch: pytest.MonkeyPatch) -> None:

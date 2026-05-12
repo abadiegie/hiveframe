@@ -340,6 +340,21 @@ _REVIEW_SYSTEM_PROMPT = (
 )
 
 
+_ANALYSIS_STYLE_GUIDE = (
+    "## Analysis style\n\n"
+    "Write a concise but comprehensive analysis in this order:\n"
+    "1. Overall summary\n"
+    "2. Key findings as distinct bullet points\n"
+    "3. Caveats / data limitations\n"
+    "4. Optional next step or recommendation\n\n"
+    "Rules:\n"
+    "- Use both the sample rows and any statistics shown in the context; do not rely only on the first few rows when broader statistics are available.\n"
+    "- Avoid repeating the same observation or restating the same idea in different words.\n"
+    "- If evidence is limited, say so once and explain what would confirm the conclusion.\n"
+    "- Keep each finding distinct: do not duplicate the same claim in multiple sentences."
+)
+
+
 def build_multi_frame_messages(
     instruction: str,
     frame_contexts: dict[str, str],
@@ -384,6 +399,7 @@ def build_multi_frame_messages(
         "- If the instruction asks for a chart or visualization, include a `series` array\n"
         "  with the aggregated data ready for plotting. Use value_counts or groupby from\n"
         "  the sample data shown. If sample size is too small, note it in analysis.\n\n"
+        f"{_ANALYSIS_STYLE_GUIDE}\n\n"
         "## Response format\n\n"
         "Respond with raw JSON (no markdown fences):\n"
         "{\n"
@@ -786,6 +802,17 @@ def build_review_messages(
 
 _ANALYSIS_WITH_SERIES_PROMPT = (
     "You are a data analyst generating insights from query results.\n\n"
+    "## Analysis style\n\n"
+    "Write a concise but comprehensive analysis in this order:\n"
+    "1. Overall summary\n"
+    "2. Key findings as distinct bullet points\n"
+    "3. Caveats / data limitations\n"
+    "4. Optional next step or recommendation\n\n"
+    "Rules:\n"
+    "- Use the query results directly; do not repeat the same point in multiple sentences.\n"
+    "- If results suggest a trend, state the trend once and then support it with a distinct detail.\n"
+    "- If evidence is limited, say so once and be explicit about what additional data would strengthen the conclusion.\n"
+    "- Keep each finding distinct: do not duplicate the same claim in multiple sentences.\n\n"
     "## Output format\n\n"
     "Respond with raw JSON:\n"
     "{\n"

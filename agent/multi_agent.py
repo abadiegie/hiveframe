@@ -510,6 +510,82 @@ class MultiFrameAgent:
         )
         return {}
 
+    def _profile_frame(self, df: "pd.DataFrame", label: str) -> "FrameProfile":
+        """Generate comprehensive statistical profile of a frame."""
+        import pandas as pd
+
+        from .result import ColumnProfile, FrameProfile
+
+        columns_profile: dict[str, ColumnProfile] = {}
+
+        for col in df.columns:
+            col_name = str(col)
+            dtype = df[col].dtype
+            null_count = int(df[col].isna().sum())
+            null_pct = float(null_count / len(df)) if len(df) > 0 else 0.0
+            unique_count = int(df[col].nunique())
+
+            is_numeric = pd.api.types.is_numeric_dtype(dtype)
+            is_categorical = (
+                pd.api.types.is_object_dtype(dtype)
+                or pd.api.types.is_categorical_dtype(dtype)
+            )
+            is_temporal = pd.api.types.is_datetime64_any_dtype(dtype)
+
+            profile = ColumnProfile(
+                column_name=col_name,
+                dtype=str(dtype),
+                null_count=null_count,
+                null_pct=null_pct,
+                unique_count=unique_count,
+                is_numeric=is_numeric,
+                is_categorical=is_categorical,
+                is_temporal=is_temporal,
+            )
+
+            # Numeric statistics
+            if is_numeric and unique_count > 1:
+                try:
+                    profile.min = float(df[col].min())
+                    profile.max = float(df[col].max())
+                    profile.mean = float(df[col].mean())
+                    profile.median = float(df[col].median())
+                    profile.std = float(df[col].std())
+                except (ValueError, TypeError):
+                    pass
+
+            # Top categorical values
+            if is_categorical and unique_count <= 100:
+                try:
+                    top_vals = df[col].value_counts().head(10)
+                    profile.top_values = [(str(k), int(v)) for k, v in top_vals.items()]
+                except Exception:
+                    pass
+
+            columns_profile[col_name] = profile
+
+        # Auto-detect good groupby columns (categorical, reasonable cardinality)
+        top_groupby: dict[str, list[dict[str, Any]]] = {}
+        for col, prof in columns_profile.items():
+            if prof.is_categorical and 2 <= prof.unique_count <= 50:
+                try:
+                    counts = df[col].value_counts().head(20)
+                    total = len(df)
+                    top_groupby[col] = [
+                        {"value": str(v), "count": int(c), "pct": round(c / total, 4)}
+                        for v, c in counts.items()
+                    ]
+                except Exception:
+                    pass
+
+        return FrameProfile(
+            frame_label=label,
+            row_count=len(df),
+            col_count=len(df.columns),
+            columns=columns_profile,
+            top_groupby_results=top_groupby,
+        )
+
     async def analyze(
         self,
         instruction: str,
@@ -519,6 +595,7 @@ class MultiFrameAgent:
         output_frame: "DFrame | None" = None,
         max_retries: int = 0,
         columns_hint: dict[str, list[str]] | None = None,
+        include_profile: bool = True,
     ) -> MultiFrameResult:
         """Run LLM analysis over one or multiple frames.
 
@@ -532,6 +609,8 @@ class MultiFrameAgent:
             columns_hint: Dict label -> list of relevant columns. When set,
                 sample/query context prioritizes these columns to reduce
                 payload size. When None, behavior remains unchanged.
+            include_profile: Whether to include frame profiles and aggregation
+                snapshots in the result (default True).
         """
         if mode not in ("sample", "query"):
             raise ValueError("mode must be 'sample' or 'query'")
@@ -563,10 +642,52 @@ class MultiFrameAgent:
 
         result.mode = mode
 
+        # Attach frame profiles if requested
+        if include_profile:
+            self._attach_frame_profiles(result, fresh_frames)
+
         if output_frame is not None and result.operations:
             result.write_result = await self._write_to_frame(result.operations, output_frame)
 
         return result
+    
+    def _attach_frame_profiles(
+        self,
+        result: MultiFrameResult,
+        fresh_frames: dict[str, "pd.DataFrame"],
+    ) -> None:
+        """Generate and attach frame profiles + aggregation snapshots to result."""
+        from .result import AggregationSnapshot
+
+        profiles = {}
+        snapshots = []
+
+        for label, frame in self._frames.items():
+            fresh = fresh_frames.get(label)
+            if fresh is None:
+                try:
+                    fresh = frame.read_fresh()
+                except Exception as e:
+                    logger.warning("Could not read frame '%s' for profiling: %s", label, e)
+                    continue
+
+            # Generate profile
+            profile = self._profile_frame(fresh, label)
+            profiles[label] = profile
+
+            # Generate aggregation snapshots from top_groupby_results
+            for col, groupby_data in profile.top_groupby_results.items():
+                snapshot = AggregationSnapshot(
+                    frame_label=label,
+                    aggregation_column=col,
+                    aggregation_type="value_counts",
+                    data=groupby_data,
+                    title=f"{label} - {col}",
+                )
+                snapshots.append(snapshot)
+
+        result.frame_profiles = profiles
+        result.aggregation_snapshots = snapshots
 
     async def _analyze_sample_mode(
         self,
@@ -1443,6 +1564,5 @@ class MultiFrameAgent:
             operations=list(plan.get("operations", [])),
             series=series,
         )
-
 
 
