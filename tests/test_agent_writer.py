@@ -464,3 +464,137 @@ def test_stream_normalize_snapshot_shows_absolute_indices(monkeypatch) -> None:
     # pandas to_string shows the index column — must be 2 and 3
     assert "2 " in second_blob or "\n2" in second_blob
     assert "3 " in second_blob or "\n3" in second_blob
+
+
+# --------------------------------------------------------------------------- #
+# Bug regression: stream_normalize actually writes to DFrame (no batch_enrich mock)
+# --------------------------------------------------------------------------- #
+
+def test_stream_normalize_actually_writes_to_dataframe() -> None:
+    """stream_normalize must update the DFrame without manual cache invalidation."""
+    df = DFrame({"city": ["jakarta", "bandung"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    async def mock_llm(messages):
+        return [
+            {"cell_id": f"{df._frame_id}::city_0", "value": "DKI Jakarta", "confidence": 0.95},
+            {"cell_id": f"{df._frame_id}::city_1", "value": "Jawa Barat", "confidence": 0.92},
+        ]
+
+    # Seed the snapshot cache BEFORE the write
+    _ = df.read_fresh()
+
+    result = asyncio.run(writer.stream_normalize("city", mock_llm, chunk_size=2))
+
+    # read_fresh() must reflect the written values immediately (no manual invalidation needed)
+    fresh = df.read_fresh()
+    assert result["written"] == 2
+    assert fresh.at[0, "city"] == "DKI Jakarta"
+    assert fresh.at[1, "city"] == "Jawa Barat"
+
+
+def test_batch_enrich_invalidates_snapshot_cache_immediately() -> None:
+    """batch_enrich write must be visible via read_fresh() without TTL wait."""
+    df = DFrame({"city": ["jakarta", "bandung"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    # Seed the cache
+    _ = df.read_fresh()
+
+    asyncio.run(writer.batch_enrich([
+        {"cell_id": f"{df._frame_id}::city_0", "value": "DKI Jakarta", "confidence": 0.95},
+    ]))
+
+    # Must see updated value immediately without sleeping or manual invalidation
+    fresh = df.read_fresh()
+    assert fresh.at[0, "city"] == "DKI Jakarta"
+    assert fresh.at[1, "city"] == "bandung"
+
+
+def test_stream_normalize_context_columns_prefilters_dataframe(monkeypatch) -> None:
+    """When context_columns is provided, stream_normalize must not send extra columns to LLM."""
+    df = DFrame({"city": ["jakarta", "bandung"], "score": [10, 20], "country": ["ID", "ID"]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def fake_llm_call(messages):
+        captured_messages.append(messages)
+        return []
+
+    async def fake_batch_enrich(items):
+        return {"written": 0, "skipped": len(items)}
+
+    monkeypatch.setattr(writer, "batch_enrich", fake_batch_enrich)
+
+    asyncio.run(
+        writer.stream_normalize(
+            "city",
+            fake_llm_call,
+            chunk_size=2,
+            context_columns=["score"],
+        )
+    )
+
+    assert captured_messages
+    blob = "\n".join(msg["content"] for msg in captured_messages[0] if isinstance(msg, dict))
+    assert "city" in blob
+    assert "score" in blob
+    # 'country' must NOT appear in the LLM context since it's not in context_columns
+    assert "country" not in blob
+
+
+def test_stream_normalize_many_writes_multiple_columns() -> None:
+    """stream_normalize_many must normalize each column and reflect changes in DFrame."""
+    df = DFrame({"city": ["jakarta", "bandung"], "province": [None, None]})
+    writer = AgentWriter(
+        coordinator=df._coordinator,
+        agent_id="normalizer",
+        author_type="llm_normalization",
+        frame_id=df._frame_id,
+    )
+
+    async def mock_llm(messages):
+        import re
+        sys_content = next(m["content"] for m in messages if m["role"] == "system" and "Frame ID" in m["content"])
+        fid = re.search(r"Frame ID: `([^`]+)`", sys_content).group(1)
+        col = re.search(r"Column: `([^`]+)`", sys_content).group(1)
+        range_m = re.search(r"Row index range in this chunk: (\d+) to (\d+)", sys_content)
+        start_idx, end_idx = int(range_m.group(1)), int(range_m.group(2))
+        return [
+            {"cell_id": f"{fid}::{col}_{i}", "value": f"norm_{col}_{i}", "confidence": 0.95}
+            for i in range(start_idx, end_idx + 1)
+        ]
+
+    # Seed cache before
+    _ = df.read_fresh()
+
+    results = asyncio.run(writer.stream_normalize_many(
+        columns=["city", "province"],
+        llm_call=mock_llm,
+        chunk_size=2,
+    ))
+
+    fresh = df.read_fresh()
+    assert results["city"]["written"] == 2
+    assert results["province"]["written"] == 2
+    assert fresh.at[0, "city"] == "norm_city_0"
+    assert fresh.at[1, "city"] == "norm_city_1"
+    assert fresh.at[0, "province"] == "norm_province_0"
+    assert fresh.at[1, "province"] == "norm_province_1"
+

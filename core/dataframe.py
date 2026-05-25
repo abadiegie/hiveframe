@@ -93,10 +93,10 @@ class DFrame:
         self._schema = schema or {}
         self._transactional = transactional
         self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "0") == "1"
-        # Simple short-lived cache for the local snapshot to avoid repeated builds
-        # when users call multiple read properties/operators in quick succession.
-        self._snapshot_cache: tuple[pd.DataFrame, float] | None = None  # (frame, ts)
-        self._snapshot_cache_ttl = 0.1  # seconds
+        # Version-based snapshot cache: invalidated whenever write_node._version changes.
+        # Stores (frame, write_node_version) so any external write (e.g. via AgentWriter)
+        # is reflected on the next read_fresh() call without needing manual invalidation.
+        self._snapshot_cache: tuple[pd.DataFrame, int] | None = None  # (frame, version)
         if data:
             self._seed_initial_data(data)
 
@@ -839,14 +839,14 @@ class DFrame:
         return subset.reset_index(drop=True)
 
     def _get_cached_snapshot(self) -> pd.DataFrame:
-        """Return cached snapshot if fresh; otherwise build and cache it."""
-        now = time.time()
+        """Return cached snapshot if write_node hasn't changed; otherwise rebuild."""
+        current_version = self._coordinator.write_node._version
         if self._snapshot_cache is not None:
-            frame, ts = self._snapshot_cache
-            if now - ts <= self._snapshot_cache_ttl:
+            frame, cached_version = self._snapshot_cache
+            if cached_version == current_version:
                 return frame
         frame = self._build_local_snapshot()
-        self._snapshot_cache = (frame, now)
+        self._snapshot_cache = (frame, current_version)
         return frame
 
     def _invalidate_snapshot_cache(self) -> None:

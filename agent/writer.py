@@ -448,6 +448,13 @@ class AgentWriter:
 
         if column not in df.columns:
             raise ValueError(f"Column '{column}' not found in DataFrame")
+
+        # Pre-filter df to target column + context columns only.
+        # This avoids sending irrelevant columns to the LLM and reduces memory usage.
+        if context_columns is not None:
+            needed = [column] + [c for c in context_columns if c != column and c in df.columns]
+            df = df[needed]
+
         total = len(df)
         written = 0
         skipped = 0
@@ -477,16 +484,13 @@ class AgentWriter:
                 len(chunk),
             )
 
-            # Build snapshot with target column + optional context columns.
+            # Build snapshot: df is already pre-filtered to target + context columns.
+            # Use all available columns in the chunk.
             if context_columns is None:
                 selected_cols = list(chunk.columns)
             else:
-                requested = [column, *context_columns]
-                selected_cols = [col for col in requested if col in chunk.columns]
-                # Keep deterministic order and avoid duplicates.
-                selected_cols = list(dict.fromkeys(selected_cols))
-                if column not in selected_cols:
-                    selected_cols.insert(0, column)
+                # df is already pre-filtered; use all its columns.
+                selected_cols = list(chunk.columns)
 
             # Use absolute row indices so LLM generates correct cell_ids.
             # chunk.index already holds 0-based positions from reset_index above.
