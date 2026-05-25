@@ -308,6 +308,7 @@ class RelationalAgentWriter:
         target_column: str,
         instruction: str,
         chunk_size: int = 10,
+        context_columns: list[str] | None = None,
         provider: str = "anthropic",
         model: str | None = None,
         anthropic_api_key: str | None = None,
@@ -346,6 +347,19 @@ class RelationalAgentWriter:
 
         if target_column not in fresh.columns:
             logger.warning("target_column '%s' not found in target frame, will be created", target_column)
+
+        # Pre-filter target-row columns to reduce prompt bloat while still keeping
+        # relation foreign keys required for context lookup.
+        if context_columns is not None:
+            requested = [target_column, *context_columns]
+            selected_cols = [col for col in requested if col in fresh.columns]
+            selected_cols = list(dict.fromkeys(selected_cols))
+            for rel in self._relations:
+                fk_col = rel.from_column
+                if fk_col in fresh.columns and fk_col not in selected_cols:
+                    selected_cols.append(fk_col)
+            if selected_cols:
+                fresh = fresh[selected_cols]
 
         for i in range(0, total, chunk_size):
             chunk = fresh.iloc[i : i + chunk_size]

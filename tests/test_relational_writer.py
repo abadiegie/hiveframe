@@ -589,6 +589,61 @@ def test_stream_normalize_on_progress_called(monkeypatch: pytest.MonkeyPatch) ->
     assert progress[-1][0] == progress[-1][1]
 
 
+def test_stream_normalize_relational_context_columns_filters_target_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _writer_many_to_one()
+    captured_messages: list[list[dict[str, str]]] = []
+
+    async def fake_llm(messages: list[dict[str, str]]) -> str:
+        captured_messages.append(messages)
+        return json.dumps({"action": "batch_enrich", "operations": []})
+
+    monkeypatch.setattr(writer, "_make_llm_caller", lambda *args, **kwargs: fake_llm)
+
+    _ = asyncio.run(
+        writer.stream_normalize_relational(
+            target_column="stance",
+            instruction="classify",
+            chunk_size=2,
+            context_columns=["text"],
+            provider="anthropic",
+        )
+    )
+
+    assert captured_messages
+    first_user = next(msg["content"] for msg in captured_messages[0] if msg["role"] == "user")
+    # Requested target-row context: text (+ target column). Extra target columns are excluded.
+    assert "text:" in first_user
+    assert "stance:" in first_user
+    assert "comment_id:" not in first_user
+    assert "author: u1" not in first_user
+
+
+def test_stream_normalize_relational_context_columns_keeps_relation_fk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _writer_many_to_one()
+
+    async def fake_llm(messages: list[dict[str, str]]) -> str:
+        user = next(msg["content"] for msg in messages if msg["role"] == "user")
+        # Even when not explicitly requested, post_id must be present for relation lookup.
+        assert "post_id:" in user
+        return json.dumps({"action": "batch_enrich", "operations": []})
+
+    monkeypatch.setattr(writer, "_make_llm_caller", lambda *args, **kwargs: fake_llm)
+
+    _ = asyncio.run(
+        writer.stream_normalize_relational(
+            target_column="stance",
+            instruction="classify",
+            chunk_size=2,
+            context_columns=["text"],
+            provider="anthropic",
+        )
+    )
+
+
 def test_stream_normalize_self_ref(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = DFrame(
         {
