@@ -56,6 +56,7 @@ class RuntimeConfig:
     heartbeat_interval_ms: int = 1000
     heartbeat_timeout_ms: int = 5000
     suspect_multiplier: int = 2
+    suspect_rebalance_debounce_ms: int = 0
     # Transport retry config
     send_max_retries: int = 3
     send_base_backoff_ms: int = 200
@@ -151,6 +152,7 @@ class ClusterRuntime:
             interval_s=max(0.05, float(config.heartbeat_interval_ms) / 1000.0),
             timeout_s=max(0.1, float(config.heartbeat_timeout_ms) / 1000.0),
             suspect_multiplier=max(1.0, float(config.suspect_multiplier)),
+            suspect_rebalance_debounce_s=max(0.0, float(config.suspect_rebalance_debounce_ms) / 1000.0),
         )
         self.heartbeat.on_status_change(self._on_heartbeat_status_change)
 
@@ -378,6 +380,20 @@ class ClusterRuntime:
             }
             for n in writers
         ]
+        all_nodes = await self.registry.get_write_nodes()
+        all_nodes += await self.registry.get_read_nodes()
+        members_payload = [
+            {
+                "node_id": n.node_id,
+                "host": n.host,
+                "port": n.port,
+                "role": n.role,
+                "status": n.status,
+            }
+            for n in all_nodes
+        ]
+        self._record_metadata_op("cluster_membership", "members", members_payload)
+        self._record_metadata_op("cluster_routing", "partition_map", partition_map)
         msg = Message.build(
             message_type=MessageType.REBALANCE,
             sender_id=self.config.node_id,
@@ -459,7 +475,11 @@ class ClusterRuntime:
         apply_partition_map = getattr(self.registry, "apply_partition_map", None)
         if not callable(apply_partition_map):
             return
-        applied = await apply_partition_map(partition_map)
+        try:
+            applied = await apply_partition_map(partition_map)
+        except ValueError as exc:
+            logger.warning("Rejected invalid ROUTE_UPDATE from leader=%s error=%s", message.sender_id, exc)
+            return
         if applied:
             logger.info(
                 "Applied ROUTE_UPDATE from leader=%s entries=%d",
@@ -646,6 +666,19 @@ class ClusterRuntime:
             full_resync_count=self._full_resync_count,
         )
 
+    def _record_metadata_op(self, entity: str, key: str, value: Any) -> None:
+        """Persist leader metadata-plane changes to op-log for follower pull/resync paths."""
+        if not self.config.enable_cluster:
+            return
+        if not self.config.is_leader:
+            return
+        if self.op_log is None:
+            return
+        try:
+            self.op_log.append_local_acked(entity, key, value)
+        except Exception as exc:
+            logger.warning("Failed to append metadata op entity=%s key=%s error=%s", entity, key, exc)
+
     def get_cluster_stats(self) -> dict[str, Any]:
         """Return runtime + coordinator metrics snapshot for observability."""
         self._update_metrics_snapshot()
@@ -663,6 +696,8 @@ class ClusterRuntime:
             "outbox_depth": self._outbox_depth,
             "conflict_count": self._conflict_count,
             "full_resync_count": self._full_resync_count,
+            "oplog_pending_ops": len(self.op_log.get_pending_ops()) if self.op_log is not None else 0,
+            "oplog_last_acked_op_id": self.op_log.get_last_acked_op_id() if self.op_log is not None else None,
         }
 
     def _audit_event(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -906,6 +941,7 @@ class ClusterRuntime:
         self.coordinator._leader_node_id = self.config.node_id
         if self.op_log is not None:
             self.op_log.set_leader_epoch(max(1, self.op_log.get_leader_epoch() + 1))
+            self._record_metadata_op("cluster_membership", "leader_node_id", self.config.node_id)
         if hasattr(self.registry, "set_write_guard_context"):
             self.registry.set_write_guard_context(local_node_id=self.config.node_id, is_leader=True)
         self._audit_event("LEADER_CHANGE", {

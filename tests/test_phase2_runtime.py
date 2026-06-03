@@ -654,3 +654,164 @@ def test_route_update_applies_partition_map_to_registry() -> None:
     asyncio.run(run())
 
 
+def test_route_update_rejects_invalid_partition_map_and_keeps_previous() -> None:
+    async def run() -> None:
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="route-follower-invalid",
+                role="write",
+                enable_cluster=True,
+                leader_node_id="route-leader",
+            )
+        )
+        await runtime.start()
+
+        await runtime.registry.register(
+            runtime._NodeInfo(
+                node_id="route-w2-invalid",
+                host="127.0.0.1",
+                port=19211,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=1.0,
+                lsn=0,
+                status="healthy",
+            )
+        )
+
+        valid = Message.build(
+            message_type=MessageType.ROUTE_UPDATE,
+            sender_id="route-leader",
+            sender_region="ap-southeast-1",
+            payload={
+                "partition_map": [
+                    {"node_id": "route-follower-invalid", "partition_start": 0, "partition_end": 500},
+                    {"node_id": "route-w2-invalid", "partition_start": 500, "partition_end": 1000},
+                ]
+            },
+        )
+        await runtime._handle_route_update(valid)
+
+        invalid = Message.build(
+            message_type=MessageType.ROUTE_UPDATE,
+            sender_id="route-leader",
+            sender_region="ap-southeast-1",
+            payload={
+                "partition_map": [
+                    {"node_id": "route-follower-invalid", "partition_start": 0, "partition_end": 400},
+                    {"node_id": "route-w2-invalid", "partition_start": 450, "partition_end": 1000},
+                ]
+            },
+        )
+        await runtime._handle_route_update(invalid)
+
+        local = await runtime.registry.get_node("route-follower-invalid")
+        other = await runtime.registry.get_node("route-w2-invalid")
+        assert local is not None
+        assert other is not None
+        assert (local.partition_start, local.partition_end) == (0, 500)
+        assert (other.partition_start, other.partition_end) == (500, 1000)
+
+        await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_cluster_write_raises_when_remote_owner_not_resolvable() -> None:
+    async def run() -> None:
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="strict-local",
+                role="write",
+                enable_cluster=True,
+                leader_node_id="strict-local",
+                is_leader=True,
+            )
+        )
+        await runtime.start()
+        await runtime.registry.register(
+            runtime._NodeInfo(
+                node_id="strict-remote",
+                host="127.0.0.1",
+                port=19212,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=1.0,
+                lsn=0,
+                status="healthy",
+            )
+        )
+
+        route = Message.build(
+            message_type=MessageType.ROUTE_UPDATE,
+            sender_id="strict-local",
+            sender_region="ap-southeast-1",
+            payload={
+                "partition_map": [
+                    {"node_id": "strict-remote", "partition_start": 0, "partition_end": 500},
+                    {"node_id": "strict-local", "partition_start": 500, "partition_end": 1000},
+                ]
+            },
+        )
+        await runtime._handle_route_update(route)
+
+        from core.dataframe import DFrame
+
+        frame = DFrame.from_runtime(runtime)
+        with pytest.raises(RuntimeError, match="Remote write proxy/runtime is required"):
+            frame["x"] = [42]
+
+        await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_leader_metadata_ops_replicate_to_follower_via_oplog_pull() -> None:
+    async def run() -> None:
+        leader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="meta-leader",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="meta-leader",
+                sync_interval_ms=50,
+            )
+        )
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="meta-follower",
+                role="read",
+                enable_cluster=True,
+                leader_node_id="meta-leader",
+                sync_interval_ms=50,
+            )
+        )
+
+        await leader.start()
+        await follower.start()
+        await asyncio.sleep(0.3)
+
+        assert leader.op_log is not None
+        assert follower.op_log is not None
+        leader_ops = leader.op_log.export_all_acked()
+        follower_ops = follower.op_log.export_all_acked()
+
+        assert any(op["entity"] == "cluster_routing" and op["key"] == "partition_map" for op in leader_ops)
+        assert any(op["entity"] == "cluster_membership" and op["key"] == "members" for op in leader_ops)
+        assert any(op["entity"] == "cluster_routing" and op["key"] == "partition_map" for op in follower_ops)
+
+        stats = leader.get_cluster_stats()
+        assert "oplog_pending_ops" in stats
+        assert "oplog_last_acked_op_id" in stats
+
+        await follower.stop()
+        await leader.stop()
+
+    asyncio.run(run())
+
+

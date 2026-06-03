@@ -60,3 +60,8 @@ temp/
 # Optional lock files
 Pipfile.lock
 poetry.lock
+
+# Local planning docs
+plan.md
+**/plan.md
+

@@ -98,6 +98,22 @@ def test_operation_log_append_and_dedup(tmp_path) -> None:
     log.close()
 
 
+def test_operation_log_append_local_acked(tmp_path) -> None:
+    db_path = tmp_path / "oplog_append_acked.db"
+    log = OperationLog(str(db_path), node_id="leader", leader_epoch=4)
+
+    op_id = log.append_local_acked("cluster_routing", "partition_map", {"writers": 2})
+    assert op_id.startswith("4-")
+    assert log.get_pending_ops() == []
+
+    all_acked = log.export_all_acked()
+    assert len(all_acked) == 1
+    assert all_acked[0]["entity"] == "cluster_routing"
+    assert all_acked[0]["key"] == "partition_map"
+
+    log.close()
+
+
 def test_operation_log_conflict_policy_leader_wins(tmp_path) -> None:
     db_path = tmp_path / "oplog_conflict.db"
     leader_log = OperationLog(str(db_path), node_id="leader", leader_epoch=1)

@@ -166,6 +166,24 @@ class OperationLog:
             self._conn.commit()
         return op_id
 
+    def append_local_acked(self, entity: str, key: str, value: Any) -> str:
+        """Append local operation and mark it acked immediately (leader-local metadata updates)."""
+        op_id = self.append_local(entity, key, value)
+        self.apply_acked(
+            [
+                {
+                    "op_id": op_id,
+                    "entity": entity,
+                    "key": key,
+                    "value": value,
+                    "version": 1,
+                    "origin_node_id": self.node_id,
+                    "created_at": time.time(),
+                }
+            ]
+        )
+        return op_id
+
     def get_pending_ops(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
