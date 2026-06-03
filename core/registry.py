@@ -181,7 +181,8 @@ class ClusterRegistry:
         node.lsn = lsn
         node.last_seen = time.time()
         logger.debug("update_lsn: node=%s lsn=%d", node_id, lsn)
-        await self._notify(node, "updated")
+        # Liveness telemetry updates are high-frequency and do not change ownership.
+        # Avoid watcher fan-out churn; routing events are emitted on joined/suspect/failed.
 
     async def mark_healthy(self, node_id: str) -> None:
         """Mark a node healthy again after suspect/failed recovery."""
@@ -289,7 +290,7 @@ class ClusterRegistry:
         node.wal_reachable = wal_reachable
         logger.debug("update_capability_flags: node=%s leader_reachable=%s wal_reachable=%s",
                      node_id, leader_reachable, wal_reachable)
-        await self._notify(node, "updated")
+        # Capability flag refresh should not trigger rebalance watchers by itself.
 
     async def _notify(self, node: NodeInfo, event_type: str) -> None:
         logger.debug("Notifying watchers: node=%s event=%s watchers=%d", node.node_id, event_type, len(self._watchers))

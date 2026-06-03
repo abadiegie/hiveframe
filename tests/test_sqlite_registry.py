@@ -68,7 +68,7 @@ def test_sqlite_registry_rebalances_and_marks_failed(tmp_path) -> None:
         updated = await registry.get_node("w2")
         assert updated is not None
         assert updated.lsn == 9
-        assert ("updated", "w2") in events
+        assert ("updated", "w2") not in events
 
         await registry.mark_failed("w1")
         failed = await registry.get_node("w1")

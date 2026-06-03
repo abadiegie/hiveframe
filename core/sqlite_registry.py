@@ -277,9 +277,7 @@ class SQLiteRegistry:
                 (lsn, time.time(), node_id),
             )
             conn.commit()
-        node = await self.get_node(node_id)
-        if node is not None:
-            await self._notify(node, "updated")
+        # Liveness telemetry update only; avoid watcher fan-out on every heartbeat tick.
 
     async def mark_healthy(self, node_id: str) -> None:
         """Mark node healthy again and rebalance writer ownership if needed."""
@@ -422,8 +420,7 @@ class SQLiteRegistry:
             conn.commit()
         logger.debug("update_capability_flags: node=%s leader_reachable=%s wal_reachable=%s",
                      node_id, leader_reachable, wal_reachable)
-        updated_node = await self.get_node(node_id) or node
-        await self._notify(updated_node, "updated")
+        # Capability flag refresh does not represent a topology/routing ownership change.
 
     async def watch(self, callback: WatchCallback) -> None:
         self._watchers.append(callback)

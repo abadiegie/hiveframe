@@ -351,7 +351,9 @@ class ClusterRuntime:
 
     async def _on_registry_event(self, node, event: str) -> None:
         """Broadcast REBALANCE message to all peers when partition map changes."""
-        logger.info("Registry event: %s for node %s role=%s", event, getattr(node, 'node_id', None), getattr(node, 'role', None))
+        if event not in ("joined", "failed", "suspect"):
+            return
+        logger.debug("Registry event: %s for node %s role=%s", event, getattr(node, 'node_id', None), getattr(node, 'role', None))
         if event == "joined":
             self._audit_event("JOIN", {
                 "node_id": getattr(node, "node_id", None),
@@ -364,8 +366,6 @@ class ClusterRuntime:
                 "role": getattr(node, "role", None),
                 "status": getattr(node, "status", None),
             })
-        if event not in ("joined", "failed", "suspect"):
-            return
         from .message import Message, MessageType
         writers = await self.registry.get_write_nodes()
         await self._refresh_transport_peers()
