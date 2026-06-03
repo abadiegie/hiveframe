@@ -6,6 +6,7 @@
 from .cluster_runtime import ClusterRuntime, RuntimeConfig
 from .dataframe import DFrame, read
 from .message import Message, MessageType
+from .op_log import OperationLog
 from .registry import ClusterRegistry, NodeInfo
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "DFrame",
     "Message",
     "MessageType",
+    "OperationLog",
     "NodeInfo",
     "RuntimeConfig",
     "read",

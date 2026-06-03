@@ -83,3 +83,65 @@ def test_sqlite_registry_rebalances_and_marks_failed(tmp_path) -> None:
 
     asyncio.run(run())
 
+
+def test_sqlite_registry_single_writer_guard_blocks_critical_metadata(tmp_path) -> None:
+    async def run() -> None:
+        registry = SQLiteRegistry(str(tmp_path / "registry_guard.db"))
+        registry.set_write_guard_context(local_node_id="follower-1", is_leader=False)
+        await registry.connect()
+
+        node = NodeInfo(
+            node_id="w1",
+            host="127.0.0.1",
+            port=19310,
+            role="write",
+            region="ap-southeast-1",
+            partition_start=0,
+            partition_end=1000,
+            last_seen=time.time(),
+            lsn=0,
+            status="healthy",
+        )
+        await registry.register(node)
+
+        # Liveness-only update is allowed.
+        await registry.register(
+            NodeInfo(
+                node_id="w1",
+                host="127.0.0.1",
+                port=19310,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=time.time(),
+                lsn=1,
+                status="healthy",
+            )
+        )
+
+        # Critical metadata change (partition ownership) must be blocked.
+        try:
+            await registry.register(
+                NodeInfo(
+                    node_id="w1",
+                    host="127.0.0.1",
+                    port=19310,
+                    role="write",
+                    region="ap-southeast-1",
+                    partition_start=10,
+                    partition_end=990,
+                    last_seen=time.time(),
+                    lsn=2,
+                    status="healthy",
+                )
+            )
+            raise AssertionError("single-writer guard should block partition ownership updates")
+        except RuntimeError as exc:
+            assert "single-writer guard" in str(exc)
+
+        registry.close()
+
+    asyncio.run(run())
+
+

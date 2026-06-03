@@ -765,6 +765,18 @@ class DFrame:
 
     def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> None:
         """Submit operation groups to the correct coordinator per owning node."""
+        # Capability gate: check if this node can accept writes.
+        # Only enforced when cluster is enabled — prevents silent corruption.
+        if self._runtime is not None and self._runtime.config.enable_cluster:
+            cap = self._runtime.get_local_capability()
+            if cap != "rw":
+                from .coordinator import CapabilityError
+                raise CapabilityError(
+                    f"Write rejected: node {self._runtime.config.node_id!r} capability is "
+                    f"{cap!r} (expected 'rw'). "
+                    "This node is read-only or draining. Route writes to an 'rw' node."
+                )
+
         for node_id, ops in node_ops.items():
             if not ops:
                 continue
@@ -991,6 +1003,13 @@ class DFrame:
     read_global_lazy = read_fresh_global_lazy
     read_global_lazy_async = read_fresh_global_lazy_async
     read_fresh_async = read_fresh_global_async
+
+    # Phase 2 aliases: cleaner naming for cluster-aware reads
+    # read_cluster* → fan-out reads across all cluster nodes
+    # read_local    → local write-node snapshot only (no fan-out)
+    read_cluster = read_fresh_global
+    read_cluster_async = read_fresh_global_async
+    read_local = read_fresh
 
     # -------------------------------------------------------------------------
     # Pandas proxy layer

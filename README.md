@@ -143,6 +143,70 @@ asyncio.run(main())
 
 For full cluster setup including TCP/QUIC transport and SQLite/NATS registry, see the [Homelab Setup guide](https://abadiegie.github.io/hiveframe/guides/homelab-setup/).
 
+### RuntimeConfig hardening knobs (quorum + audit)
+
+Use these fields when you want startup safety gates and lightweight audit events.
+
+| Field | Default | Purpose |
+|---|---:|---|
+| `required_cluster` | `False` | Block startup until cluster health conditions are met. |
+| `required_cluster_min_nodes` | `1` | Minimum healthy nodes (total) required at startup. |
+| `required_cluster_min_write_nodes` | `0` | Minimum healthy write nodes required at startup. |
+| `required_cluster_min_read_nodes` | `0` | Minimum healthy read nodes required at startup. |
+| `audit_log_path` | `None` | JSONL audit file path (`JOIN/LEAVE/SUSPECT/DEAD/LEADER_CHANGE`). |
+| `audit_log_max_bytes` | `10485760` | Rotate audit log when size exceeds this value. |
+| `audit_log_backup_count` | `3` | Number of rotated files to keep (`.1`, `.2`, ...). |
+| `metrics_enabled` | `True` | Enable runtime metrics snapshot updates. |
+
+```python
+from hiveframe.core.cluster_runtime import ClusterRuntime, RuntimeConfig
+
+runtime = ClusterRuntime(
+    RuntimeConfig(
+        node_id="r1",
+        role="read",
+        enable_cluster=True,
+        leader_node_id="w1",
+        required_cluster=True,
+        required_cluster_min_nodes=2,
+        required_cluster_min_write_nodes=1,
+        required_cluster_min_read_nodes=1,
+        audit_log_path="/var/log/hiveframe/audit.log",
+        audit_log_max_bytes=5_000_000,
+        audit_log_backup_count=5,
+    )
+)
+```
+
+---
+
+## Chunked Resync Protocol
+
+When a follower node falls too far behind the leader (epoch mismatch or compacted WAL), it triggers a **full op-log resync** instead of incremental pull.
+
+```
+follower  ──manifest request──▶  leader
+          ◀── {chunk_count, sha256} ──
+          ──chunk[0]──▶  leader
+          ◀── chunk_b64 ──
+          ...
+          ──chunk[N]──▶  leader
+          ◀── chunk_b64 ──
+          [verify sha256 → restore SQLite snapshot]
+```
+
+**Three modes** over `OPLOG_FULL_RESYNC` / `OPLOG_FULL_RESYNC_RESPONSE`:
+
+| Mode | Payload | Purpose |
+|------|---------|---------|
+| `manifest` | `chunk_count`, `sha256` | Announce snapshot size + checksum |
+| `chunk` | `chunk_index`, `chunk_b64` | Transfer 256 KB slice of SQLite DB |
+| `ops` | `ops: [...]` | Fallback: plain op list when chunk path unavailable |
+
+Checksum verified before applying. On mismatch the follower falls back to `mode=ops`.
+
+> 📄 Full protocol detail (message shapes, op_id format, entry points): [`docs/internals/chunked-resync.md`](docs/internals/chunked-resync.md)
+
 ---
 
 ## Install extras

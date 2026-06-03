@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from threading import Event, Thread
 from typing import Awaitable, Callable
 
@@ -21,6 +22,11 @@ logger = logging.getLogger("core.tcp_transport")
 
 MessageHandler = Callable[[Message], Awaitable[None]]
 LegacyHandler = Callable[[dict], dict]
+
+_SEND_MAX_RETRIES = 3
+_SEND_BASE_BACKOFF_MS = 200
+_SEND_MAX_BACKOFF_MS = 10_000
+_SEND_JITTER = True
 
 
 class InMemoryTCPTransport:
@@ -271,7 +277,18 @@ class TCPTransport:
     async def connect(self, host: str, port: int) -> object:
         if not self._running:
             raise RuntimeError("Transport must listen before connect")
-        reader, writer = await asyncio.open_connection(host, port)
+        _reader, writer = await asyncio.open_connection(host, port)
+        join = self._with_sender_hint(
+            Message.build(
+                message_type=MessageType.JOIN,
+                sender_id=self.node_id,
+                sender_region="local",
+                payload={"host": self.host, "port": self.port},
+            )
+        )
+        encoded = join.serialize()
+        writer.write(len(encoded).to_bytes(4, "big") + encoded)
+        await writer.drain()
         writer.close()
         await writer.wait_closed()
 
@@ -303,14 +320,63 @@ class TCPTransport:
         packet = len(data).to_bytes(4, "big") + data
 
         host, port = target
-        try:
-            _reader, writer = await asyncio.open_connection(host, port)
-            writer.write(packet)
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            logger.exception("TCPTransport.send failed: from=%s to=%s (%s:%s)", self.node_id, node_id, host, port)
+        await self._send_with_retry(
+            node_id=node_id,
+            host=host,
+            port=port,
+            packet=packet,
+            max_retries=_SEND_MAX_RETRIES,
+            base_backoff_ms=_SEND_BASE_BACKOFF_MS,
+            max_backoff_ms=_SEND_MAX_BACKOFF_MS,
+            jitter=_SEND_JITTER,
+        )
+
+    async def _send_with_retry(
+        self,
+        *,
+        node_id: str,
+        host: str,
+        port: int,
+        packet: bytes,
+        max_retries: int,
+        base_backoff_ms: int,
+        max_backoff_ms: int,
+        jitter: bool,
+    ) -> None:
+        delay = max(0.0, base_backoff_ms / 1000.0)
+        for attempt in range(max_retries + 1):
+            try:
+                _reader, writer = await asyncio.open_connection(host, port)
+                writer.write(packet)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
+            except Exception:
+                if attempt >= max_retries:
+                    logger.exception(
+                        "TCPTransport.send failed after retries: from=%s to=%s (%s:%s)",
+                        self.node_id,
+                        node_id,
+                        host,
+                        port,
+                    )
+                    return
+                sleep_for = min(delay, max_backoff_ms / 1000.0)
+                if jitter:
+                    sleep_for = random.uniform(0.0, sleep_for)
+                logger.warning(
+                    "TCPTransport.send retry: from=%s to=%s (%s:%s) attempt=%d/%d backoff=%.3fs",
+                    self.node_id,
+                    node_id,
+                    host,
+                    port,
+                    attempt + 1,
+                    max_retries + 1,
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                delay *= 2
 
     async def broadcast(self, message: Message, exclude: list[str] | None = None) -> None:
         excluded = set(exclude or [])

@@ -45,7 +45,9 @@ def test_tcp_transport_request_response_and_broadcast() -> None:
         await node_c.listen("127.0.0.1", 19202)
         try:
             await node_a.connect("127.0.0.1", 19201)
+            await asyncio.sleep(0)
             assert "node-b" in node_a._connected_nodes
+            assert ("b", MessageType.JOIN.value) in seen
 
             request = Message.build(
                 message_type=MessageType.READ_SNAPSHOT_REQUEST,
@@ -119,5 +121,3 @@ def test_tcp_transport_legacy_shim_inside_running_event_loop() -> None:
         assert response == {"ok": True, "echo": {"n": 9}}
 
     asyncio.run(run())
-
-

@@ -10,6 +10,8 @@ import time
 from typing import Awaitable, Callable
 import logging
 
+from . import node_status
+
 
 @dataclass(slots=True)
 class NodeInfo:
@@ -23,6 +25,16 @@ class NodeInfo:
     last_seen: float
     lsn: int
     status: str
+    leader_reachable: bool = True
+    wal_reachable: bool = True
+    leader_epoch: int = 0
+
+    @property
+    def capability(self) -> str:
+        """Compute capability (rw|ro|drain) from current state."""
+        return node_status.compute_capability(
+            self.role, self.status, self.leader_reachable, self.wal_reachable
+        )
 
 
 WatchCallback = Callable[[NodeInfo, str], Awaitable[None]]
@@ -85,7 +97,7 @@ class ClusterRegistry:
     def _write_nodes_sorted(self) -> list[NodeInfo]:
         """Return healthy write nodes sorted by node_id for deterministic ordering."""
         return sorted(
-            [n for n in self._nodes.values() if n.role == "write" and n.status != "failed"],
+            [n for n in self._nodes.values() if n.role == "write" and n.status == "healthy"],
             key=lambda n: n.node_id,
         )
 
@@ -127,7 +139,7 @@ class ClusterRegistry:
 
     async def get_write_node(self) -> NodeInfo | None:
         for node in self._nodes.values():
-            if node.role == "write" and node.status != "failed":
+            if node.role == "write" and node.status == "healthy":
                 logger.debug("get_write_node -> %s", node.node_id)
                 return node
         logger.debug("get_write_node -> None")
@@ -138,7 +150,7 @@ class ClusterRegistry:
         nodes = [
             node
             for node in self._nodes.values()
-            if node.role == "write" and node.status != "failed"
+            if node.role == "write" and node.status == "healthy"
         ]
         logger.debug("get_write_nodes -> %d nodes", len(nodes))
         return nodes
@@ -182,6 +194,32 @@ class ClusterRegistry:
         self._rebalance_partitions()
         logger.info("Node marked failed: %s", node_id)
         await self._notify(node, "failed")
+
+    async def mark_suspect(self, node_id: str) -> None:
+        """Mark a node as suspect (intermediate state before failure)."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            logger.debug("mark_suspect: node %s not found", node_id)
+            return
+        if node.status == "suspect":
+            logger.debug("mark_suspect: node %s already suspect", node_id)
+            return
+        node.status = "suspect"
+        node.last_seen = time.time()
+        logger.info("Node marked suspect: %s", node_id)
+        await self._notify(node, "suspect")
+
+    async def update_capability_flags(self, node_id: str, leader_reachable: bool, wal_reachable: bool) -> None:
+        """Update leader_reachable and wal_reachable flags for a node."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            logger.debug("update_capability_flags: node %s not found", node_id)
+            return
+        node.leader_reachable = leader_reachable
+        node.wal_reachable = wal_reachable
+        logger.debug("update_capability_flags: node=%s leader_reachable=%s wal_reachable=%s",
+                     node_id, leader_reachable, wal_reachable)
+        await self._notify(node, "updated")
 
     async def _notify(self, node: NodeInfo, event_type: str) -> None:
         logger.debug("Notifying watchers: node=%s event=%s watchers=%d", node.node_id, event_type, len(self._watchers))

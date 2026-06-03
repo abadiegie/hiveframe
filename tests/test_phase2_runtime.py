@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 
 import pandas as pd
@@ -204,6 +205,398 @@ def test_nats_registry_real_connect() -> None:
         await runtime.start()
         node = await runtime.registry.get_node("n1")
         assert node is not None
+
+    asyncio.run(run())
+
+
+def test_runtime_tcp_seed_hosts_bootstrap_connects_to_seed() -> None:
+    async def run() -> None:
+        seed = ClusterRuntime(
+            RuntimeConfig(
+                node_id="seed-node",
+                role="write",
+                host="127.0.0.1",
+                port=19140,
+                enable_cluster=True,
+                transport_backend="tcp",
+            )
+        )
+        joiner = ClusterRuntime(
+            RuntimeConfig(
+                node_id="joiner-node",
+                role="read",
+                host="127.0.0.1",
+                port=19141,
+                enable_cluster=True,
+                transport_backend="tcp",
+                seed_hosts=["127.0.0.1:19140"],
+            )
+        )
+
+        await seed.start()
+        await joiner.start()
+        await asyncio.sleep(0.02)
+
+        assert "seed-node" in joiner.transport._connected_nodes
+        assert "joiner-node" in seed.transport._connected_nodes
+
+        await joiner.heartbeat.stop()
+        await seed.heartbeat.stop()
+        await joiner.transport.close()
+        await seed.transport.close()
+
+    asyncio.run(run())
+
+
+def test_runtime_get_cluster_stats_exposes_phase4_metrics() -> None:
+    async def run() -> None:
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="metrics-node",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="metrics-node",
+            )
+        )
+        await runtime.start()
+        stats = runtime.get_cluster_stats()
+
+        assert "coordinator" in stats
+        assert "replication_lag_ops" in stats
+        assert "outbox_depth" in stats
+        assert "conflict_count" in stats
+        assert "full_resync_count" in stats
+
+        assert "replication_lag_ops" in stats["coordinator"]
+        assert "outbox_depth" in stats["coordinator"]
+        assert "conflict_count" in stats["coordinator"]
+        assert "full_resync_count" in stats["coordinator"]
+
+        await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_required_cluster_gate_times_out_without_leader() -> None:
+    async def run() -> None:
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="follower-timeout",
+                role="read",
+                enable_cluster=True,
+                required_cluster=True,
+                leader_node_id="missing-leader",
+                heartbeat_timeout_ms=250,
+            )
+        )
+        with pytest.raises(RuntimeError, match="required_cluster startup gate failed"):
+            await follower.start()
+
+        # Best-effort cleanup if startup failed mid-sequence.
+        try:
+            await follower.stop()
+        except Exception:
+            pass
+
+    asyncio.run(run())
+
+
+def test_required_cluster_gate_succeeds_when_leader_reachable() -> None:
+    async def run() -> None:
+        leader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="leader-ready",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="leader-ready",
+            )
+        )
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="follower-ready",
+                role="read",
+                enable_cluster=True,
+                required_cluster=True,
+                leader_node_id="leader-ready",
+            )
+        )
+
+        await leader.start()
+        await follower.start()
+
+        node = await follower.registry.get_node("follower-ready")
+        assert node is not None
+        assert node.leader_reachable is True
+
+        await follower.stop()
+        await leader.stop()
+
+    asyncio.run(run())
+
+
+def test_required_cluster_min_nodes_gate_blocks_without_quorum() -> None:
+    async def run() -> None:
+        leader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="leader-quorum",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="leader-quorum",
+            )
+        )
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="follower-quorum",
+                role="read",
+                enable_cluster=True,
+                required_cluster=True,
+                required_cluster_min_nodes=3,
+                leader_node_id="leader-quorum",
+                heartbeat_timeout_ms=250,
+            )
+        )
+
+        await leader.start()
+        with pytest.raises(RuntimeError, match="required_cluster startup gate failed"):
+            await follower.start()
+
+        await leader.stop()
+        try:
+            await follower.stop()
+        except Exception:
+            pass
+
+    asyncio.run(run())
+
+
+def test_runtime_writes_audit_events(tmp_path) -> None:
+    async def run() -> None:
+        audit_path = tmp_path / "audit.log"
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="audit-node",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="audit-node",
+                audit_log_path=str(audit_path),
+            )
+        )
+
+        await runtime.start()
+        await runtime.promote_to_leader()
+        await runtime.stop()
+
+        assert audit_path.exists()
+        lines = [line.strip() for line in audit_path.read_text().splitlines() if line.strip()]
+        assert lines
+
+        events = [json.loads(line).get("event") for line in lines]
+        assert "JOIN" in events
+        assert "LEADER_CHANGE" in events
+        assert "LEAVE" in events
+
+    asyncio.run(run())
+
+
+def test_runtime_tcp_chunked_full_resync_via_join_membership_update() -> None:
+    async def run() -> None:
+        leader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="leader-chunked",
+                role="write",
+                host="127.0.0.1",
+                port=19160,
+                enable_cluster=True,
+                transport_backend="tcp",
+                is_leader=True,
+                leader_node_id="leader-chunked",
+            )
+        )
+
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="follower-chunked",
+                role="read",
+                host="127.0.0.1",
+                port=19161,
+                enable_cluster=True,
+                transport_backend="tcp",
+                leader_node_id="leader-chunked",
+                seed_hosts=["127.0.0.1:19160"],
+                full_resync_threshold_ops=1,
+            )
+        )
+
+        await leader.start()
+
+        assert leader.op_log is not None
+        # Inflate leader snapshot so manifest/chunk path is exercised with many chunks.
+        leader_ops = [
+            {
+                "op_id": f"1-{i:020d}",
+                "entity": "registry",
+                "key": f"route-{i}",
+                "value": {"payload": "x" * 4096, "idx": i},
+                "version": 1,
+                "origin_node_id": "leader-chunked",
+                "created_at": float(i),
+            }
+            for i in range(1, 180)
+        ]
+        leader.op_log.apply_acked(leader_ops)
+        expected_last = leader.op_log.get_last_acked_op_id()
+        assert expected_last is not None
+
+        await follower.start()
+        assert follower.op_log is not None
+
+        fallback_used = {"value": False}
+        original_fallback = follower.op_log._fallback_full_resync_ops
+
+        async def _wrapped_fallback(leader_node_id: str, transport) -> None:
+            fallback_used["value"] = True
+            await original_fallback(leader_node_id, transport)
+
+        follower.op_log._fallback_full_resync_ops = _wrapped_fallback  # type: ignore[method-assign]
+
+        # Force a fresh JOIN after both replication handlers are active.
+        join_msg = Message.build(
+            message_type=MessageType.JOIN,
+            sender_id="follower-chunked",
+            sender_region="ap-southeast-1",
+            payload={"host": "127.0.0.1", "port": 19161},
+        )
+        await follower.transport.send("leader-chunked", join_msg)
+        await asyncio.sleep(0.25)
+
+        got_last = follower.op_log.get_last_acked_op_id()
+        assert got_last == expected_last
+        assert fallback_used["value"] is False
+
+        await follower.stop()
+        await leader.stop()
+        await follower.heartbeat.stop()
+        await leader.heartbeat.stop()
+        await follower.transport.close()
+        await leader.transport.close()
+
+    asyncio.run(run())
+
+
+def test_required_cluster_role_quorum_gate() -> None:
+    async def run() -> None:
+        leader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="leader-role-quorum",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="leader-role-quorum",
+            )
+        )
+        reader = ClusterRuntime(
+            RuntimeConfig(
+                node_id="reader-role-quorum",
+                role="read",
+                enable_cluster=True,
+                required_cluster=True,
+                required_cluster_min_nodes=2,
+                required_cluster_min_write_nodes=1,
+                required_cluster_min_read_nodes=1,
+                leader_node_id="leader-role-quorum",
+            )
+        )
+
+        await leader.start()
+        await reader.start()
+        await reader.stop()
+        await leader.stop()
+
+    asyncio.run(run())
+
+
+def test_audit_log_rotation(tmp_path) -> None:
+    async def run() -> None:
+        audit_path = tmp_path / "audit-rotate.log"
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="audit-rotate-node",
+                role="write",
+                enable_cluster=True,
+                is_leader=True,
+                leader_node_id="audit-rotate-node",
+                audit_log_path=str(audit_path),
+                audit_log_max_bytes=200,
+                audit_log_backup_count=2,
+            )
+        )
+        await runtime.start()
+
+        for i in range(20):
+            runtime._audit_event("JOIN", {"i": i, "padding": "x" * 40})
+
+        await runtime.stop()
+
+        backup_1 = tmp_path / "audit-rotate.log.1"
+        backup_2 = tmp_path / "audit-rotate.log.2"
+        assert audit_path.exists() or backup_1.exists()
+        assert backup_1.exists() or backup_2.exists()
+
+    asyncio.run(run())
+
+
+def test_membership_update_triggers_full_resync_on_large_gap(tmp_path) -> None:
+    async def run() -> None:
+        follower = ClusterRuntime(
+            RuntimeConfig(
+                node_id="follower-gap",
+                role="read",
+                enable_cluster=True,
+                leader_node_id="leader-gap",
+                full_resync_threshold_ops=10,
+                db_path=str(tmp_path / "follower_gap_registry.db"),
+            )
+        )
+        assert follower.op_log is not None
+        follower.op_log.apply_acked(
+            [
+                {
+                    "op_id": "1-00000000000000000001",
+                    "entity": "registry",
+                    "key": "route",
+                    "value": {"a": 1},
+                    "version": 1,
+                    "origin_node_id": "leader-gap",
+                    "created_at": 1.0,
+                }
+            ]
+        )
+
+        called = {"n": 0}
+
+        async def fake_resync(leader_node_id: str, _transport) -> None:
+            called["n"] += 1
+            assert leader_node_id == "leader-gap"
+
+        follower.op_log.full_resync_from_leader = fake_resync  # type: ignore[method-assign]
+
+        msg = Message.build(
+            message_type=MessageType.MEMBERSHIP_UPDATE,
+            sender_id="leader-gap",
+            sender_region="ap-southeast-1",
+            payload={
+                "leader_node_id": "leader-gap",
+                "leader_last_op_id": "1-00000000000000000100",
+            },
+        )
+        await follower._handle_membership_update(msg)
+        assert called["n"] == 1
+
+        await follower.stop()
 
     asyncio.run(run())
 

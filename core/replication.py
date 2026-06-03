@@ -8,15 +8,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 from .message import Message, MessageType
-from .quic_transport import QuicTransport
 from .registry import ClusterRegistry
 from .wal import WriteAheadLog
 
 
 logger = logging.getLogger("core.replication")
+
+
+MessageHandler = Callable[[Message], Awaitable[None]]
+
+
+class TransportProtocol(Protocol):
+    _handler: MessageHandler | None
+
+    def on_message(self, handler: MessageHandler) -> None: ...
+    async def broadcast(self, message: Message, exclude: list[str] | None = None) -> None: ...
+    async def send(self, node_id: str, message: Message) -> None: ...
+    def resolve_pending(self, request_id: str, response: Message) -> None: ...
 
 
 class ReplicationManager:
@@ -27,7 +38,7 @@ class ReplicationManager:
         node_id: str,
         node_region: str,
         role: str,
-        transport: QuicTransport,
+        transport: TransportProtocol,
         registry: ClusterRegistry,
         wal: WriteAheadLog,
         apply_entry: Callable[[dict[str, Any]], None] | None = None,
@@ -43,6 +54,12 @@ class ReplicationManager:
         self._apply_entry = apply_entry
         self._seed_chunk_handler: Callable[[str, dict[str, list[Any]], int, str, bool], None] | None = None
         self._seen_chunk_offsets: dict[str, set[int]] = {}
+        self._join_handler: Callable[[Message], Awaitable[None]] | None = None
+        self._membership_update_handler: Callable[[Message], Awaitable[None]] | None = None
+        self._route_update_handler: Callable[[Message], Awaitable[None]] | None = None
+        self._oplog_push_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
+        self._oplog_pull_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
+        self._oplog_full_resync_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
 
     async def start(self) -> None:
         existing_handler = self.transport._handler
@@ -103,6 +120,24 @@ class ReplicationManager:
             await self._handle_snapshot_request(message)
         elif message.type == MessageType.READ_SNAPSHOT_RESPONSE:
             await self._handle_snapshot_response(message)
+        elif message.type == MessageType.JOIN:
+            await self._handle_join(message)
+        elif message.type == MessageType.MEMBERSHIP_UPDATE:
+            await self._handle_membership_update(message)
+        elif message.type == MessageType.ROUTE_UPDATE:
+            await self._handle_route_update(message)
+        elif message.type == MessageType.OPLOG_PUSH:
+            await self._handle_oplog_push(message)
+        elif message.type == MessageType.OPLOG_PULL:
+            await self._handle_oplog_pull(message)
+        elif message.type == MessageType.OPLOG_FULL_RESYNC:
+            await self._handle_oplog_full_resync(message)
+        elif message.type in {
+            MessageType.OPLOG_PUSH_RESPONSE,
+            MessageType.OPLOG_PULL_RESPONSE,
+            MessageType.OPLOG_FULL_RESYNC_RESPONSE,
+        }:
+            await self._handle_oplog_response(message)
 
     async def _handle_delta(self, message: Message) -> None:
         lsn = int(message.payload["lsn"])
@@ -207,6 +242,71 @@ class ReplicationManager:
         request_id = str(message.payload.get("request_id", ""))
         self.transport.resolve_pending(request_id, message)
 
+    async def _handle_join(self, message: Message) -> None:
+        if self._join_handler is None:
+            return
+        await self._join_handler(message)
+
+    async def _handle_membership_update(self, message: Message) -> None:
+        if self._membership_update_handler is None:
+            return
+        await self._membership_update_handler(message)
+
+    async def _handle_route_update(self, message: Message) -> None:
+        if self._route_update_handler is None:
+            return
+        await self._route_update_handler(message)
+
+    async def _handle_oplog_push(self, message: Message) -> None:
+        if self._oplog_push_handler is None:
+            return
+        payload = await self._oplog_push_handler(message)
+        response = Message.build(
+            message_type=MessageType.OPLOG_PUSH_RESPONSE,
+            sender_id=self.node_id,
+            sender_region=self.node_region,
+            payload={
+                "request_id": message.payload.get("request_id"),
+                **payload,
+            },
+        )
+        await self.transport.send(message.sender_id, response)
+
+    async def _handle_oplog_pull(self, message: Message) -> None:
+        if self._oplog_pull_handler is None:
+            return
+        payload = await self._oplog_pull_handler(message)
+        response = Message.build(
+            message_type=MessageType.OPLOG_PULL_RESPONSE,
+            sender_id=self.node_id,
+            sender_region=self.node_region,
+            payload={
+                "request_id": message.payload.get("request_id"),
+                **payload,
+            },
+        )
+        await self.transport.send(message.sender_id, response)
+
+    async def _handle_oplog_full_resync(self, message: Message) -> None:
+        if self._oplog_full_resync_handler is None:
+            return
+        payload = await self._oplog_full_resync_handler(message)
+        response = Message.build(
+            message_type=MessageType.OPLOG_FULL_RESYNC_RESPONSE,
+            sender_id=self.node_id,
+            sender_region=self.node_region,
+            payload={
+                "request_id": message.payload.get("request_id"),
+                **payload,
+            },
+        )
+        await self.transport.send(message.sender_id, response)
+
+    async def _handle_oplog_response(self, message: Message) -> None:
+        request_id = str(message.payload.get("request_id", ""))
+        if request_id:
+            self.transport.resolve_pending(request_id, message)
+
     def set_snapshot_provider(self, provider: Callable[..., dict[str, Any]]) -> None:
         """Register a callback that returns this node's snapshot as a serializable dict.
         The callback may optionally accept a frame_id parameter.
@@ -219,4 +319,28 @@ class ReplicationManager:
     ) -> None:
         """Register handler for distributed seed chunks received over transport."""
         self._seed_chunk_handler = handler
+
+    def set_cluster_control_handlers(
+        self,
+        *,
+        join_handler: Callable[[Message], Awaitable[None]] | None = None,
+        membership_update_handler: Callable[[Message], Awaitable[None]] | None = None,
+        route_update_handler: Callable[[Message], Awaitable[None]] | None = None,
+    ) -> None:
+        """Register handlers for control-channel membership messages."""
+        self._join_handler = join_handler
+        self._membership_update_handler = membership_update_handler
+        self._route_update_handler = route_update_handler
+
+    def set_oplog_handlers(
+        self,
+        *,
+        push_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None,
+        pull_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None,
+        full_resync_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None,
+    ) -> None:
+        """Register handlers for op-log push/pull/full-resync messages."""
+        self._oplog_push_handler = push_handler
+        self._oplog_pull_handler = pull_handler
+        self._oplog_full_resync_handler = full_resync_handler
 

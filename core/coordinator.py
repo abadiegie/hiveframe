@@ -28,6 +28,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger("core.coordinator")
 
 
+class NotLeaderError(Exception):
+    """Raised when a non-leader node attempts a write in leader-required mode.
+
+    Route the write to the leader node instead of this follower.
+    """
+
+
+class CapabilityError(Exception):
+    """Raised when node capability is insufficient for the requested operation.
+
+    Node must have capability='rw' to accept writes. Current capability is
+    'ro' (read-only) or 'drain'.
+    """
+
+
 @dataclass(slots=True)
 class CoordinatorStats:
     """Basic coordinator counters and timing metrics."""
@@ -36,6 +51,10 @@ class CoordinatorStats:
     success_count: int = 0
     failed_count: int = 0
     total_commit_ms: float = 0.0
+    replication_lag_ops: int = 0
+    outbox_depth: int = 0
+    conflict_count: int = 0
+    full_resync_count: int = 0
 
     @property
     def avg_commit_ms(self) -> float:
@@ -54,6 +73,9 @@ class TransactionCoordinator:
         lock_manager: CellLockManager | None = None,
         wal: WriteAheadLog | None = None,
         replication_manager: "ReplicationManager | None" = None,
+        node_id: str | None = None,
+        is_leader: bool = False,
+        leader_node_id: str | None = None,
     ) -> None:
         self.write_node = write_node or WriteNode()
         self.read_node = read_node or ReadNode()
@@ -62,6 +84,9 @@ class TransactionCoordinator:
         self.replication_manager = replication_manager
         self.stats = CoordinatorStats()
         self._stats_lock = Lock()
+        self._node_id = node_id
+        self._is_leader = is_leader
+        self._leader_node_id = leader_node_id
         self.write_node.set_delta_callback(self.read_node.receive_delta)
         self._wal_replay_task: asyncio.Task[None] | None = None
         self._wal_replay_stop: asyncio.Event | None = None
@@ -86,6 +111,17 @@ class TransactionCoordinator:
 
     def submit(self, operations: list[Operation]) -> Transaction:
         """Execute full transaction lifecycle for a list of operations."""
+        # Leader guard: if leader_node_id is configured and this is not the leader, reject writes.
+        if (
+            self._leader_node_id is not None
+            and self._node_id is not None
+            and self._node_id != self._leader_node_id
+        ):
+            raise NotLeaderError(
+                f"Write rejected: this node ({self._node_id!r}) is not the leader "
+                f"({self._leader_node_id!r}). Route writes to the leader node."
+            )
+
         tx = Transaction(operations=operations)
         start = time.perf_counter()
 
@@ -180,7 +216,26 @@ class TransactionCoordinator:
                 "success_count": self.stats.success_count,
                 "failed_count": self.stats.failed_count,
                 "avg_commit_ms": self.stats.avg_commit_ms,
+                "replication_lag_ops": self.stats.replication_lag_ops,
+                "outbox_depth": self.stats.outbox_depth,
+                "conflict_count": self.stats.conflict_count,
+                "full_resync_count": self.stats.full_resync_count,
             }
+
+    def set_runtime_metrics(
+        self,
+        *,
+        replication_lag_ops: int,
+        outbox_depth: int,
+        conflict_count: int,
+        full_resync_count: int,
+    ) -> None:
+        """Update runtime-derived counters exposed via coordinator stats."""
+        with self._stats_lock:
+            self.stats.replication_lag_ops = max(0, int(replication_lag_ops))
+            self.stats.outbox_depth = max(0, int(outbox_depth))
+            self.stats.conflict_count = max(0, int(conflict_count))
+            self.stats.full_resync_count = max(0, int(full_resync_count))
 
     def _fire_replication(self, lsn: int, tx: Transaction) -> None:
         """Schedule replication in background without blocking caller thread."""

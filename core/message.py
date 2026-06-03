@@ -19,6 +19,9 @@ class MessageType(Enum):
 
     HELLO = "hello"
     HELLO_ACK = "hello_ack"
+    JOIN = "join"
+    MEMBERSHIP_UPDATE = "membership_update"
+    ROUTE_UPDATE = "route_update"
     HEARTBEAT = "heartbeat"
     HEARTBEAT_ACK = "heartbeat_ack"
     BYE = "bye"
@@ -30,6 +33,13 @@ class MessageType(Enum):
     SYNC_RESPONSE = "sync_response"
     READ_SNAPSHOT_REQUEST = "read_snapshot_request"
     READ_SNAPSHOT_RESPONSE = "read_snapshot_response"
+
+    OPLOG_PUSH = "oplog_push"
+    OPLOG_PUSH_RESPONSE = "oplog_push_response"
+    OPLOG_PULL = "oplog_pull"
+    OPLOG_PULL_RESPONSE = "oplog_pull_response"
+    OPLOG_FULL_RESYNC = "oplog_full_resync"
+    OPLOG_FULL_RESYNC_RESPONSE = "oplog_full_resync_response"
 
     PARTITION_MAP = "partition_map"
     ELECT_LEADER = "elect_leader"
