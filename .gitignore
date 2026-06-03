@@ -64,4 +64,6 @@ poetry.lock
 # Local planning docs
 plan.md
 **/plan.md
+*plan*.md
+**/*plan*.md
 
