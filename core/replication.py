@@ -106,7 +106,11 @@ class ReplicationManager:
         return self.wal.get_since(from_lsn)
 
     async def _on_message(self, message: Message) -> None:
-        if message.type == MessageType.DELTA and self.role == "read":
+        if message.type == MessageType.HEARTBEAT:
+            await self._handle_heartbeat(message)
+        elif message.type == MessageType.HEARTBEAT_ACK:
+            await self._handle_heartbeat_ack(message)
+        elif message.type == MessageType.DELTA and self.role == "read":
             await self._handle_delta(message)
         elif message.type == MessageType.SEED_CHUNK and self.role == "write":
             await self._handle_seed_chunk(message)
@@ -138,6 +142,21 @@ class ReplicationManager:
             MessageType.OPLOG_FULL_RESYNC_RESPONSE,
         }:
             await self._handle_oplog_response(message)
+
+    async def _handle_heartbeat(self, message: Message) -> None:
+        if message.sender_id and message.sender_id != self.node_id:
+            await self.registry.update_lsn(message.sender_id, 0)
+        ack = Message.build(
+            message_type=MessageType.HEARTBEAT_ACK,
+            sender_id=self.node_id,
+            sender_region=self.node_region,
+            payload={"ts": time.time()},
+        )
+        await self.transport.send(message.sender_id, ack)
+
+    async def _handle_heartbeat_ack(self, message: Message) -> None:
+        if message.sender_id and message.sender_id != self.node_id:
+            await self.registry.update_lsn(message.sender_id, 0)
 
     async def _handle_delta(self, message: Message) -> None:
         lsn = int(message.payload["lsn"])

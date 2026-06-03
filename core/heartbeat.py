@@ -22,7 +22,9 @@ class TransportProtocol(Protocol):
 class RegistryProtocol(Protocol):
     async def get_read_nodes(self) -> list[Any]: ...
     async def get_write_nodes(self) -> list[Any]: ...
+    async def update_lsn(self, node_id: str, lsn: int) -> None: ...
     async def mark_failed(self, node_id: str) -> None: ...
+    async def mark_healthy(self, node_id: str) -> None: ...
 
 
 logger = logging.getLogger("core.heartbeat")
@@ -40,6 +42,7 @@ class HeartbeatManager:
         interval_s: float = 10.0,
         timeout_s: float = 30.0,
         suspect_multiplier: float = 2.0,
+        suspect_rebalance_debounce_s: float = 0.0,
     ) -> None:
         self.node_id = node_id
         self.node_region = node_region
@@ -48,9 +51,11 @@ class HeartbeatManager:
         self.interval_s = interval_s
         self.timeout_s = timeout_s
         self.suspect_multiplier = max(1.0, suspect_multiplier)
+        self.suspect_rebalance_debounce_s = max(0.0, suspect_rebalance_debounce_s)
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._node_states: dict[str, str] = {}
+        self._suspect_since: dict[str, float] = {}
         self._status_callback: Callable[[str, str, str], Awaitable[None] | None] | None = None
 
         logger.info("HeartbeatManager initialized: node_id=%s region=%s interval_s=%s timeout_s=%s nats=%s",
@@ -93,6 +98,11 @@ class HeartbeatManager:
         )
         logger.debug("Sending heartbeat from node %s payload=%s", self.node_id, message.payload)
         await self.transport.broadcast(message)
+        update_lsn = getattr(self.registry, "update_lsn", None)
+        if callable(update_lsn):
+            result = update_lsn(self.node_id, 0)
+            if inspect.isawaitable(result):
+                await result
 
     async def _check_timeouts(self) -> None:
         now = time.time()
@@ -109,8 +119,16 @@ class HeartbeatManager:
                 await self._transition_status(node.node_id, "failed")
                 continue
             if age > self.timeout_s:
+                first_seen = self._suspect_since.get(node.node_id)
+                if first_seen is None:
+                    self._suspect_since[node.node_id] = now
+                    if self.suspect_rebalance_debounce_s > 0.0:
+                        continue
+                elif (now - first_seen) < self.suspect_rebalance_debounce_s:
+                    continue
                 await self._transition_status(node.node_id, "suspect")
                 continue
+            self._suspect_since.pop(node.node_id, None)
             await self._transition_status(node.node_id, "healthy")
 
     async def _transition_status(self, node_id: str, new_status: str) -> None:
@@ -121,10 +139,18 @@ class HeartbeatManager:
         if new_status == "failed":
             logger.info("Handling node failure for %s (marking failed in registry)", node_id)
             await self.registry.mark_failed(node_id)
+            self._suspect_since.pop(node_id, None)
         elif new_status == "suspect":
             mark_suspect = getattr(self.registry, "mark_suspect", None)
             if callable(mark_suspect):
                 result = mark_suspect(node_id)
+                if inspect.isawaitable(result):
+                    await result
+        elif new_status == "healthy":
+            self._suspect_since.pop(node_id, None)
+            mark_healthy = getattr(self.registry, "mark_healthy", None)
+            if callable(mark_healthy):
+                result = mark_healthy(node_id)
                 if inspect.isawaitable(result):
                     await result
 

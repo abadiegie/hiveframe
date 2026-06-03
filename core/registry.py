@@ -183,6 +183,21 @@ class ClusterRegistry:
         logger.debug("update_lsn: node=%s lsn=%d", node_id, lsn)
         await self._notify(node, "updated")
 
+    async def mark_healthy(self, node_id: str) -> None:
+        """Mark a node healthy again after suspect/failed recovery."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            logger.debug("mark_healthy: node %s not found", node_id)
+            return
+        if node.status == "healthy":
+            return
+        node.status = "healthy"
+        node.last_seen = time.time()
+        if node.role == "write":
+            self._rebalance_partitions()
+        logger.info("Node marked healthy: %s", node_id)
+        await self._notify(node, "updated")
+
     async def mark_failed(self, node_id: str) -> None:
         node = self._nodes.get(node_id)
         if node is None:
@@ -214,6 +229,7 @@ class ClusterRegistry:
 
     async def apply_partition_map(self, partition_map: list[dict[str, int | str]]) -> int:
         """Apply leader-provided partition ownership map to local registry state."""
+        self._validate_partition_map(partition_map)
         applied = 0
         for entry in partition_map:
             node_id = str(entry.get("node_id", "") or "")
@@ -233,6 +249,35 @@ class ClusterRegistry:
         if applied:
             logger.info("Applied partition map entries=%d", applied)
         return applied
+
+    def _validate_partition_map(self, partition_map: list[dict[str, int | str]]) -> None:
+        if not partition_map:
+            raise ValueError("partition map is empty")
+        prev_end: int | None = None
+        seen_node_ids: set[str] = set()
+        for idx, entry in enumerate(partition_map):
+            node_id = str(entry.get("node_id", "") or "")
+            if not node_id:
+                raise ValueError(f"partition map entry {idx} missing node_id")
+            if node_id in seen_node_ids:
+                raise ValueError(f"partition map entry {idx} duplicate node_id '{node_id}'")
+            seen_node_ids.add(node_id)
+            node = self._nodes.get(node_id)
+            if node is None or node.role != "write":
+                raise ValueError(f"partition map entry {idx} references non-writer node '{node_id}'")
+            start = int(entry.get("partition_start", -1))
+            end = int(entry.get("partition_end", -1))
+            if start < 0 or end > _PARTITION_TOTAL or start >= end:
+                raise ValueError(f"partition map entry {idx} has invalid range [{start}, {end})")
+            if prev_end is None:
+                if start != 0:
+                    raise ValueError("partition map must start at 0")
+            else:
+                if start != prev_end:
+                    raise ValueError(f"partition map gap/overlap between {prev_end} and {start}")
+            prev_end = end
+        if prev_end != _PARTITION_TOTAL:
+            raise ValueError(f"partition map must end at {_PARTITION_TOTAL}, got {prev_end}")
 
     async def update_capability_flags(self, node_id: str, leader_reachable: bool, wal_reachable: bool) -> None:
         """Update leader_reachable and wal_reachable flags for a node."""

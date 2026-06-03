@@ -19,6 +19,8 @@ class _FakeRegistry:
         self._nodes = {n.node_id: n for n in nodes}
         self.failed: list[str] = []
         self.suspect: list[str] = []
+        self.healthy: list[str] = []
+        self.lsn_updates: list[tuple[str, int]] = []
 
     async def get_read_nodes(self) -> list[_Node]:
         return []
@@ -31,6 +33,12 @@ class _FakeRegistry:
 
     async def mark_suspect(self, node_id: str) -> None:
         self.suspect.append(node_id)
+
+    async def mark_healthy(self, node_id: str) -> None:
+        self.healthy.append(node_id)
+
+    async def update_lsn(self, node_id: str, lsn: int) -> None:
+        self.lsn_updates.append((node_id, lsn))
 
 
 class _FakeTransport:
@@ -93,7 +101,52 @@ def test_heartbeat_transitions_back_to_healthy() -> None:
         await manager._check_timeouts()
 
         assert ("writer-2", "suspect", "healthy") in seen
+        assert "writer-2" in registry.healthy
         assert registry.failed == []
 
     asyncio.run(run())
+
+
+def test_heartbeat_suspect_rebalance_debounce_delays_suspect() -> None:
+    async def run() -> None:
+        node = _Node(node_id="writer-3", last_seen=time.time() - 1.2)
+        registry = _FakeRegistry([node])
+        manager = HeartbeatManager(
+            node_id="self",
+            node_region="local",
+            registry=registry,
+            transport=_FakeTransport(),
+            interval_s=0.1,
+            timeout_s=1.0,
+            suspect_multiplier=2.0,
+            suspect_rebalance_debounce_s=0.4,
+        )
+
+        await manager._check_timeouts()
+        assert registry.suspect == []
+
+        await asyncio.sleep(0.45)
+        await manager._check_timeouts()
+        assert registry.suspect == ["writer-3"]
+
+    asyncio.run(run())
+
+
+def test_heartbeat_send_updates_local_liveness_marker() -> None:
+    async def run() -> None:
+        registry = _FakeRegistry([])
+        manager = HeartbeatManager(
+            node_id="self-node",
+            node_region="local",
+            registry=registry,
+            transport=_FakeTransport(),
+            interval_s=0.1,
+            timeout_s=1.0,
+        )
+
+        await manager._send_heartbeat()
+        assert ("self-node", 0) in registry.lsn_updates
+
+    asyncio.run(run())
+
 

@@ -4,6 +4,8 @@
 import asyncio
 import time
 
+import pytest
+
 from core.sqlite_registry import NodeInfo, SQLiteRegistry
 
 
@@ -192,6 +194,42 @@ def test_sqlite_registry_mark_suspect_rebalances_writers(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_sqlite_registry_mark_healthy_restores_writer_partitioning(tmp_path) -> None:
+    async def run() -> None:
+        registry = SQLiteRegistry(str(tmp_path / "registry_healthy.db"))
+        await registry.connect()
+
+        for idx, node_id in enumerate(("w1", "w2")):
+            await registry.register(
+                NodeInfo(
+                    node_id=node_id,
+                    host="127.0.0.1",
+                    port=19350 + idx,
+                    role="write",
+                    region="ap-southeast-1",
+                    partition_start=0,
+                    partition_end=1000,
+                    last_seen=time.time(),
+                    lsn=0,
+                    status="healthy",
+                )
+            )
+
+        await registry.mark_failed("w1")
+        await registry.mark_healthy("w1")
+
+        w1 = await registry.get_node("w1")
+        w2 = await registry.get_node("w2")
+        assert w1 is not None and w1.status == "healthy"
+        assert w2 is not None
+        assert (w1.partition_start, w1.partition_end) == (0, 500)
+        assert (w2.partition_start, w2.partition_end) == (500, 1000)
+
+        registry.close()
+
+    asyncio.run(run())
+
+
 def test_sqlite_registry_apply_partition_map(tmp_path) -> None:
     async def run() -> None:
         registry = SQLiteRegistry(str(tmp_path / "registry_route.db"))
@@ -225,6 +263,51 @@ def test_sqlite_registry_apply_partition_map(tmp_path) -> None:
         w2 = await registry.get_node("w2")
         assert w1 is not None and (w1.partition_start, w1.partition_end) == (0, 250)
         assert w2 is not None and (w2.partition_start, w2.partition_end) == (250, 1000)
+
+        registry.close()
+
+    asyncio.run(run())
+
+
+def test_sqlite_registry_apply_partition_map_rejects_gap_and_keeps_previous(tmp_path) -> None:
+    async def run() -> None:
+        registry = SQLiteRegistry(str(tmp_path / "registry_route_invalid.db"))
+        await registry.connect()
+
+        for idx, node_id in enumerate(("w1", "w2")):
+            await registry.register(
+                NodeInfo(
+                    node_id=node_id,
+                    host="127.0.0.1",
+                    port=19340 + idx,
+                    role="write",
+                    region="ap-southeast-1",
+                    partition_start=0,
+                    partition_end=1000,
+                    last_seen=time.time(),
+                    lsn=0,
+                    status="healthy",
+                )
+            )
+
+        await registry.apply_partition_map(
+            [
+                {"node_id": "w1", "partition_start": 0, "partition_end": 500},
+                {"node_id": "w2", "partition_start": 500, "partition_end": 1000},
+            ]
+        )
+        with pytest.raises(ValueError, match="gap/overlap"):
+            await registry.apply_partition_map(
+                [
+                    {"node_id": "w1", "partition_start": 0, "partition_end": 400},
+                    {"node_id": "w2", "partition_start": 450, "partition_end": 1000},
+                ]
+            )
+
+        w1 = await registry.get_node("w1")
+        w2 = await registry.get_node("w2")
+        assert w1 is not None and (w1.partition_start, w1.partition_end) == (0, 500)
+        assert w2 is not None and (w2.partition_start, w2.partition_end) == (500, 1000)
 
         registry.close()
 

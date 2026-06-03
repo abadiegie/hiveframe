@@ -92,7 +92,7 @@ class DFrame:
         self._frame_id = frame_id or _uuid.uuid4().hex
         self._schema = schema or {}
         self._transactional = transactional
-        self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "0") == "1"
+        self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "1") != "0"
         # Version-based snapshot cache: invalidated whenever write_node._version changes.
         # Stores (frame, write_node_version) so any external write (e.g. via AgentWriter)
         # is reflected on the next read_fresh() call without needing manual invalidation.
@@ -650,18 +650,34 @@ class DFrame:
             return total
 
         total = 0
-        node_idx = 0
         async for chunk_df in chunks:
             if chunk_df.empty:
                 continue
-            target_node = write_nodes[node_idx % len(write_nodes)]
-            node_idx += 1
-            rows = await self._send_chunk_to_node(
-                chunk_df,
-                row_offset=total,
-                target_node_id=target_node.node_id,
-            )
-            total += rows
+            chunk_len = len(chunk_df.index)
+            if chunk_len == 0:
+                continue
+            chunk_base = total
+            segment_start = 0
+            while segment_start < chunk_len:
+                absolute_row = chunk_base + segment_start
+                target_node_id = self._get_owner_node_id(absolute_row)
+                segment_end = segment_start + 1
+                while segment_end < chunk_len:
+                    next_owner_id = self._get_owner_node_id(chunk_base + segment_end)
+                    if next_owner_id != target_node_id:
+                        break
+                    segment_end += 1
+
+                segment_df = chunk_df.iloc[segment_start:segment_end].copy()
+                rows = await self._send_chunk_to_node(
+                    segment_df,
+                    row_offset=chunk_base + segment_start,
+                    target_node_id=target_node_id,
+                )
+                if rows != (segment_end - segment_start):
+                    raise RuntimeError("Distributed seed row count mismatch during partition routing")
+                segment_start = segment_end
+            total += chunk_len
             if on_progress:
                 on_progress(total)
         self._invalidate_snapshot_cache()
@@ -803,9 +819,10 @@ class DFrame:
         remote_runtime = _RuntimeRegistry.get(node_id)
         if remote_runtime is not None:
             return remote_runtime.coordinator
-        if self._strict_remote_routing:
+        if self._runtime is not None and self._runtime.config.enable_cluster and self._strict_remote_routing:
             raise RuntimeError(
                 f"Cannot resolve remote coordinator for node '{node_id}'. "
+                "Remote write proxy/runtime is required in cluster mode. "
                 "Set HIVEFRAME_STRICT_REMOTE_ROUTING=0 to allow local fallback."
             )
         logger.warning(

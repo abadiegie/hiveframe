@@ -87,10 +87,9 @@ def test_seed_distributed_two_nodes_splits_rows(tmp_path) -> None:
             df = DFrame.from_runtime(runtime_a)
 
             async def chunks():
-                yield pd.DataFrame({"x": [1, 2]})
-                yield pd.DataFrame({"x": [3, 4]})
-                yield pd.DataFrame({"x": [5, 6]})
-                yield pd.DataFrame({"x": [7, 8]})
+                yield pd.DataFrame({"x": list(range(0, 400))})
+                yield pd.DataFrame({"x": list(range(400, 800))})
+                yield pd.DataFrame({"x": list(range(800, 1200))})
 
             total = await df._seed_distributed(chunks())
             await asyncio.sleep(0.05)
@@ -98,10 +97,10 @@ def test_seed_distributed_two_nodes_splits_rows(tmp_path) -> None:
             a_frame = runtime_a._build_frame_snapshot(df._frame_id)
             b_frame = runtime_b._build_frame_snapshot(df._frame_id)
 
-            assert total == 8
-            assert len(a_frame.index) == 4
-            assert len(b_frame.index) == 4
-            assert sorted(a_frame["x"].tolist() + b_frame["x"].tolist()) == [1, 2, 3, 4, 5, 6, 7, 8]
+            assert total == 1200
+            assert len(a_frame.index) == 700
+            assert len(b_frame.index) == 500
+            assert sorted(a_frame["x"].tolist() + b_frame["x"].tolist()) == list(range(1200))
         finally:
             await _shutdown_runtime(runtime_a)
             await _shutdown_runtime(runtime_b)
@@ -162,7 +161,7 @@ def test_from_csv_lazy_distribute_true_two_nodes(tmp_path) -> None:
     async def run() -> None:
         db_path = tmp_path / "dist.csv.db"
         csv_path = tmp_path / "dist.csv"
-        pd.DataFrame({"x": list(range(12))}).to_csv(csv_path, index=False)
+        pd.DataFrame({"x": list(range(1200))}).to_csv(csv_path, index=False)
 
         runtime_a = ClusterRuntime(
             RuntimeConfig(
@@ -194,7 +193,7 @@ def test_from_csv_lazy_distribute_true_two_nodes(tmp_path) -> None:
         try:
             df = await DFrame.from_csv_lazy(
                 str(csv_path),
-                chunk_size=3,
+                chunk_size=150,
                 runtime=runtime_a,
                 distribute=True,
             )
@@ -202,9 +201,9 @@ def test_from_csv_lazy_distribute_true_two_nodes(tmp_path) -> None:
 
             a_frame = runtime_a._build_frame_snapshot(df._frame_id)
             b_frame = runtime_b._build_frame_snapshot(df._frame_id)
-            assert len(a_frame.index) + len(b_frame.index) == 12
-            assert len(a_frame.index) == 6
-            assert len(b_frame.index) == 6
+            assert len(a_frame.index) + len(b_frame.index) == 1200
+            assert len(a_frame.index) == 700
+            assert len(b_frame.index) == 500
         finally:
             await _shutdown_runtime(runtime_a)
             await _shutdown_runtime(runtime_b)
