@@ -206,8 +206,33 @@ class ClusterRegistry:
             return
         node.status = "suspect"
         node.last_seen = time.time()
+        if node.role == "write":
+            # Suspect writers are excluded from ownership; rebalance healthy writers.
+            self._rebalance_partitions()
         logger.info("Node marked suspect: %s", node_id)
         await self._notify(node, "suspect")
+
+    async def apply_partition_map(self, partition_map: list[dict[str, int | str]]) -> int:
+        """Apply leader-provided partition ownership map to local registry state."""
+        applied = 0
+        for entry in partition_map:
+            node_id = str(entry.get("node_id", "") or "")
+            if not node_id:
+                continue
+            node = self._nodes.get(node_id)
+            if node is None:
+                continue
+            try:
+                start = int(entry.get("partition_start", node.partition_start))
+                end = int(entry.get("partition_end", node.partition_end))
+            except (TypeError, ValueError):
+                continue
+            node.partition_start = start
+            node.partition_end = end
+            applied += 1
+        if applied:
+            logger.info("Applied partition map entries=%d", applied)
+        return applied
 
     async def update_capability_flags(self, node_id: str, leader_reachable: bool, wal_reachable: bool) -> None:
         """Update leader_reachable and wal_reachable flags for a node."""

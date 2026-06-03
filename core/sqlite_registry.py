@@ -324,9 +324,37 @@ class SQLiteRegistry:
                 (time.time(), node_id),
             )
             conn.commit()
+        if node.role == "write":
+            # Suspect writers should stop owning partitions immediately.
+            self._rebalance_partitions()
         logger.info("Node marked suspect: %s", node_id)
         suspect_node = await self.get_node(node_id) or node
         await self._notify(suspect_node, "suspect")
+
+    async def apply_partition_map(self, partition_map: list[dict[str, int | str]]) -> int:
+        """Apply leader-provided partition ownership map without triggering writer guard."""
+        conn = self._require_connection()
+        applied = 0
+        with self._lock:
+            for entry in partition_map:
+                node_id = str(entry.get("node_id", "") or "")
+                if not node_id:
+                    continue
+                try:
+                    start = int(entry.get("partition_start"))
+                    end = int(entry.get("partition_end"))
+                except (TypeError, ValueError):
+                    continue
+                cur = conn.execute(
+                    "UPDATE nodes SET partition_start=?, partition_end=? WHERE node_id=?",
+                    (start, end, node_id),
+                )
+                if cur.rowcount and int(cur.rowcount) > 0:
+                    applied += 1
+            conn.commit()
+        if applied:
+            logger.info("Applied partition map entries=%d", applied)
+        return applied
 
     async def update_capability_flags(self, node_id: str, leader_reachable: bool, wal_reachable: bool) -> None:
         """Update leader_reachable and wal_reachable flags for a node."""

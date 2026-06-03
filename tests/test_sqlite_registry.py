@@ -145,3 +145,89 @@ def test_sqlite_registry_single_writer_guard_blocks_critical_metadata(tmp_path) 
     asyncio.run(run())
 
 
+def test_sqlite_registry_mark_suspect_rebalances_writers(tmp_path) -> None:
+    async def run() -> None:
+        registry = SQLiteRegistry(str(tmp_path / "registry_suspect.db"))
+        await registry.connect()
+
+        await registry.register(
+            NodeInfo(
+                node_id="w1",
+                host="127.0.0.1",
+                port=19320,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=time.time(),
+                lsn=0,
+                status="healthy",
+            )
+        )
+        await registry.register(
+            NodeInfo(
+                node_id="w2",
+                host="127.0.0.1",
+                port=19321,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=time.time(),
+                lsn=0,
+                status="healthy",
+            )
+        )
+
+        await registry.mark_suspect("w1")
+        suspect = await registry.get_node("w1")
+        survivor = await registry.get_node("w2")
+        assert suspect is not None and suspect.status == "suspect"
+        assert survivor is not None
+        assert (survivor.partition_start, survivor.partition_end) == (0, 1000)
+        assert registry.get_owner_for_row(250).node_id == "w2"
+
+        registry.close()
+
+    asyncio.run(run())
+
+
+def test_sqlite_registry_apply_partition_map(tmp_path) -> None:
+    async def run() -> None:
+        registry = SQLiteRegistry(str(tmp_path / "registry_route.db"))
+        await registry.connect()
+
+        for idx, node_id in enumerate(("w1", "w2")):
+            await registry.register(
+                NodeInfo(
+                    node_id=node_id,
+                    host="127.0.0.1",
+                    port=19330 + idx,
+                    role="write",
+                    region="ap-southeast-1",
+                    partition_start=0,
+                    partition_end=1000,
+                    last_seen=time.time(),
+                    lsn=0,
+                    status="healthy",
+                )
+            )
+
+        applied = await registry.apply_partition_map(
+            [
+                {"node_id": "w1", "partition_start": 0, "partition_end": 250},
+                {"node_id": "w2", "partition_start": 250, "partition_end": 1000},
+            ]
+        )
+        assert applied == 2
+
+        w1 = await registry.get_node("w1")
+        w2 = await registry.get_node("w2")
+        assert w1 is not None and (w1.partition_start, w1.partition_end) == (0, 250)
+        assert w2 is not None and (w2.partition_start, w2.partition_end) == (250, 1000)
+
+        registry.close()
+
+    asyncio.run(run())
+
+

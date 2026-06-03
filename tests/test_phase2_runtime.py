@@ -601,3 +601,56 @@ def test_membership_update_triggers_full_resync_on_large_gap(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_route_update_applies_partition_map_to_registry() -> None:
+    async def run() -> None:
+        runtime = ClusterRuntime(
+            RuntimeConfig(
+                node_id="route-follower",
+                role="write",
+                enable_cluster=True,
+                leader_node_id="route-leader",
+            )
+        )
+        await runtime.start()
+
+        await runtime.registry.register(
+            runtime._NodeInfo(
+                node_id="route-w2",
+                host="127.0.0.1",
+                port=19210,
+                role="write",
+                region="ap-southeast-1",
+                partition_start=0,
+                partition_end=1000,
+                last_seen=1.0,
+                lsn=0,
+                status="healthy",
+            )
+        )
+
+        msg = Message.build(
+            message_type=MessageType.ROUTE_UPDATE,
+            sender_id="route-leader",
+            sender_region="ap-southeast-1",
+            payload={
+                "partition_map": [
+                    {"node_id": "route-follower", "partition_start": 0, "partition_end": 300},
+                    {"node_id": "route-w2", "partition_start": 300, "partition_end": 1000},
+                ]
+            },
+        )
+        await runtime._handle_route_update(msg)
+
+        local = await runtime.registry.get_node("route-follower")
+        other = await runtime.registry.get_node("route-w2")
+        assert local is not None
+        assert other is not None
+        assert (local.partition_start, local.partition_end) == (0, 300)
+        assert (other.partition_start, other.partition_end) == (300, 1000)
+        assert runtime.route_write(900).node_id == "route-w2"
+
+        await runtime.stop()
+
+    asyncio.run(run())
+
+

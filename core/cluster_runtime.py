@@ -362,7 +362,7 @@ class ClusterRuntime:
                 "role": getattr(node, "role", None),
                 "status": getattr(node, "status", None),
             })
-        if event not in ("joined", "failed"):
+        if event not in ("joined", "failed", "suspect"):
             return
         from .message import Message, MessageType
         writers = await self.registry.get_write_nodes()
@@ -451,9 +451,21 @@ class ClusterRuntime:
             self._update_metrics_snapshot()
             await self._set_local_capability_flags(leader_reachable=True, wal_reachable=self._wal_reachable)
 
-    async def _handle_route_update(self, _message) -> None:
-        """Route update hook for future partition map application logic."""
-        return
+    async def _handle_route_update(self, message) -> None:
+        """Apply leader partition map updates to local registry for deterministic routing."""
+        partition_map = message.payload.get("partition_map", [])
+        if not isinstance(partition_map, list) or not partition_map:
+            return
+        apply_partition_map = getattr(self.registry, "apply_partition_map", None)
+        if not callable(apply_partition_map):
+            return
+        applied = await apply_partition_map(partition_map)
+        if applied:
+            logger.info(
+                "Applied ROUTE_UPDATE from leader=%s entries=%d",
+                message.sender_id,
+                applied,
+            )
 
     # -------------------------------------------------------------------------
     # Leader config + capability helpers (Phase 2)
