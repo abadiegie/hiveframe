@@ -97,7 +97,18 @@ class HeartbeatManager:
             payload={"ts": time.time()},
         )
         logger.debug("Sending heartbeat from node %s payload=%s", self.node_id, message.payload)
-        await self.transport.broadcast(message)
+        # B7 fix: cap heartbeat broadcast at 2× interval to prevent dead-node
+        # TCP retries from starving the timeout-check loop.
+        try:
+            await asyncio.wait_for(
+                self.transport.broadcast(message),
+                timeout=max(1.0, self.interval_s * 2),
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "Heartbeat broadcast timed out after %.1fs (dead peers suspected)",
+                max(1.0, self.interval_s * 2),
+            )
         update_lsn = getattr(self.registry, "update_lsn", None)
         if callable(update_lsn):
             result = update_lsn(self.node_id, 0)

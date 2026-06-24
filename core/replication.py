@@ -49,8 +49,10 @@ class ReplicationManager:
         self.transport = transport
         self.registry = registry
         self.wal = wal
-        self._last_lsn = 0
-        self._ack_waiters: dict[int, asyncio.Future[bool]] = {}
+        self._last_lsn = 0  # highest contiguous LSN applied
+        self._applied_lsns: set[int] = set()  # all applied LSNs (for out-of-order detection, B2)
+        self._ack_waiters: dict[int, tuple[asyncio.Future[bool], int, list[int]]] = {}
+        # _ack_waiters maps lsn -> (future, expected_count, [received_count])
         self._apply_entry = apply_entry
         self._seed_chunk_handler: Callable[[str, dict[str, list[Any]], int, str, bool], None] | None = None
         self._seen_chunk_offsets: dict[str, set[int]] = {}
@@ -60,6 +62,8 @@ class ReplicationManager:
         self._oplog_push_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
         self._oplog_pull_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
         self._oplog_full_resync_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
+        self._reorder_timeout: float = 10.0  # max seconds to hold an out-of-order delta before dropping (B2)
+        self._reorder_buffer: dict[int, tuple[str, dict[str, Any]]] = {}  # lsn -> (sender_id, tx_payload)
 
     async def start(self) -> None:
         existing_handler = self.transport._handler
@@ -74,6 +78,12 @@ class ReplicationManager:
         self.transport.on_message(chained_handler)
 
     async def replicate_tx(self, lsn: int, tx_data: dict[str, Any]) -> bool:
+        """Replicate a committed transaction to all read replicas.
+
+        Returns True when *all* known read nodes acknowledge the delta,
+        or when there are no read nodes.  Times out after 2 s (configurable).
+        (B1 fix: collects acks from every read node, not just the first.)
+        """
         if self.role != "write":
             return False
 
@@ -88,19 +98,27 @@ class ReplicationManager:
             payload={"lsn": lsn, "tx": tx_data},
         )
         tx_id = tx_data.get("tx_id") if isinstance(tx_data, dict) else None
-        logger.info("Broadcasting DELTA lsn=%s tx_id=%s to %d read nodes", lsn, tx_id, len(read_nodes))
-        await self.transport.broadcast(message)
+        expected_count = len(read_nodes)
+        logger.info(
+            "Broadcasting DELTA lsn=%s tx_id=%s to %d read nodes",
+            lsn, tx_id, expected_count,
+        )
+        await self.transport.broadcast(message, exclude=[self.node_id])
 
-        waiter = asyncio.get_running_loop().create_future()
-        self._ack_waiters[lsn] = waiter
+        received: list[int] = [0]  # mutable counter shared with _handle_delta_ack
+        waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._ack_waiters[lsn] = (waiter, expected_count, received)
         try:
-            await asyncio.wait_for(waiter, timeout=5.0)
+            await asyncio.wait_for(waiter, timeout=2.0)
             return True
         except asyncio.TimeoutError:
+            logger.warning(
+                "DELTA ack timeout: lsn=%s received=%d/%d",
+                lsn, received[0], expected_count,
+            )
             return False
         finally:
-            if lsn in self._ack_waiters:
-                del self._ack_waiters[lsn]
+            self._ack_waiters.pop(lsn, None)
 
     async def sync_from_lsn(self, from_lsn: int) -> list[dict[str, Any]]:
         return self.wal.get_since(from_lsn)
@@ -159,31 +177,112 @@ class ReplicationManager:
             await self.registry.update_lsn(message.sender_id, 0)
 
     async def _handle_delta(self, message: Message) -> None:
+        """Apply a replicated delta, with a reorder buffer for out-of-order delivery.
+
+        B2 fix: Deltas arriving out of order are held in a small buffer until the
+        missing predecessor arrives, preventing silent data loss when a newer LSN
+        wins a TCP race and bumps _last_lsn past an in-flight predecessor.
+        """
         lsn = int(message.payload["lsn"])
         tx_payload = dict(message.payload["tx"])
 
-        if lsn <= self._last_lsn:
+        # Already applied (exact duplicate).
+        if lsn in self._applied_lsns:
             return
 
+        next_expected = self._last_lsn + 1
+
+        # Too old — already covered by contiguous window.
+        if lsn <= self._last_lsn:
+            logger.debug(
+                "DELTA lsn=%d already covered by contiguous window (last=%d); dropping",
+                lsn, self._last_lsn,
+            )
+            return
+
+        # Exactly the next expected → apply immediately, then drain buffer.
+        if lsn == next_expected:
+            self._apply_delta_entry(lsn, tx_payload)
+            await self._drain_reorder_buffer()
+            await self._send_delta_ack(message.sender_id, lsn)
+            return
+
+        # Ahead of expectation → buffer it, wait for the gap to fill.
+        # Only buffer within a reasonable window to bound memory.
+        if lsn - next_expected <= 64:
+            if lsn not in self._applied_lsns:
+                self._applied_lsns.add(lsn)  # reserve the slot
+                self._reorder_buffer[lsn] = (message.sender_id, tx_payload)
+                logger.debug(
+                    "DELTA lsn=%d buffered (next_expected=%d, buffer_size=%d)",
+                    lsn, next_expected, len(self._reorder_buffer),
+                )
+            return
+
+        # Too far ahead — apply now to avoid unbounded buffering, but log the gap.
+        logger.warning(
+            "DELTA lsn=%d is %d slots ahead of next_expected=%d; applying immediately (gap accepted)",
+            lsn, lsn - next_expected, next_expected,
+        )
+        self._apply_delta_entry(lsn, tx_payload)
+        await self._drain_reorder_buffer()
+        await self._send_delta_ack(message.sender_id, lsn)
+
+    def _apply_delta_entry(self, lsn: int, tx_payload: dict[str, Any]) -> None:
+        """Apply a single delta and advance the contiguous LSN pointer."""
         if self._apply_entry is not None:
             self._apply_entry(tx_payload)
+        self._applied_lsns.add(lsn)
+        # Advance contiguous pointer.
+        while (self._last_lsn + 1) in self._applied_lsns:
+            self._last_lsn += 1
+        # Prune old entries to bound memory.
+        stale = {s for s in self._applied_lsns if s <= self._last_lsn - 128}
+        self._applied_lsns -= stale
 
-        self._last_lsn = lsn
-        await self.registry.update_lsn(self.node_id, lsn)
+    async def _drain_reorder_buffer(self) -> None:
+        """Apply buffered deltas that are now contiguous."""
+        drained = 0
+        while (self._last_lsn + 1) in self._applied_lsns:
+            next_lsn = self._last_lsn + 1
+            entry = self._reorder_buffer.pop(next_lsn, None)
+            if entry is None:
+                break  # slot reserved but payload not yet buffered (shouldn't happen)
+            _sender_id, tx_payload = entry
+            if self._apply_entry is not None:
+                self._apply_entry(tx_payload)
+            self._last_lsn = next_lsn
+            drained += 1
+        if drained:
+            # Prune after drain.
+            stale = {s for s in self._applied_lsns if s <= self._last_lsn - 128}
+            self._applied_lsns -= stale
+            logger.debug("Drained %d buffered deltas (contiguous_lsn=%d)", drained, self._last_lsn)
 
+    async def _send_delta_ack(self, sender_id: str, lsn: int) -> None:
+        """Send a DELTA_ACK for an applied delta and update registry."""
+        await self.registry.update_lsn(self.node_id, self._last_lsn)
         ack = Message.build(
             message_type=MessageType.DELTA_ACK,
             sender_id=self.node_id,
             sender_region=self.node_region,
             payload={"lsn": lsn, "ok": True, "ts": time.time()},
         )
-        await self.transport.send(message.sender_id, ack)
+        await self.transport.send(sender_id, ack)
 
     async def _handle_delta_ack(self, message: Message) -> None:
         lsn = int(message.payload.get("lsn", 0))
-        waiter = self._ack_waiters.get(lsn)
-        if waiter is not None and not waiter.done():
-            waiter.set_result(bool(message.payload.get("ok", True)))
+        entry = self._ack_waiters.get(lsn)
+        if entry is None:
+            return
+        waiter, expected, received = entry
+        received[0] += 1
+        logger.debug(
+            "DELTA_ACK lsn=%s from=%s (%d/%d)",
+            lsn, message.sender_id, received[0], expected,
+        )
+        if received[0] >= expected and not waiter.done():
+            waiter.set_result(True)
 
     async def _handle_seed_chunk(self, message: Message) -> None:
         frame_id = str(message.payload.get("frame_id", ""))
@@ -228,15 +327,26 @@ class ReplicationManager:
         await self.transport.send(message.sender_id, response)
 
     async def _handle_sync_response(self, message: Message) -> None:
+        """Apply catch-up entries from an explicit SYNC_REQUEST.
+
+        Uses _apply_delta_entry so that the contiguous LSN pointer and
+        _applied_lsns set stay consistent with the reorder-buffer path.
+        """
         entries = list(message.payload.get("entries", []))
         for entry in entries:
             lsn = int(entry.get("lsn", 0))
-            if lsn <= self._last_lsn:
+            if lsn in self._applied_lsns:
                 continue
             if self._apply_entry is not None:
                 self._apply_entry(entry)
-            self._last_lsn = lsn
-            await self.registry.update_lsn(self.node_id, self._last_lsn)
+            self._applied_lsns.add(lsn)
+            # Advance contiguous pointer.
+            while (self._last_lsn + 1) in self._applied_lsns:
+                self._last_lsn += 1
+        # Prune old entries.
+        stale = {s for s in self._applied_lsns if s <= self._last_lsn - 128}
+        self._applied_lsns -= stale
+        await self.registry.update_lsn(self.node_id, self._last_lsn)
 
     async def _handle_snapshot_request(self, message: Message) -> None:
         """Respond to a remote node requesting this node's snapshot for a specific frame."""

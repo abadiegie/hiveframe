@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -408,7 +409,9 @@ class OperationLog:
     ) -> bool:
         if chunk_count <= 0:
             return False
-        buffer = bytearray()
+
+        # Build all chunk request messages upfront.
+        requests: list[tuple[int, Message]] = []
         for chunk_index in range(chunk_count):
             request_id = self._resync_request_id(self.node_id, f"chunk-{chunk_index}")
             msg = Message.build(
@@ -421,18 +424,36 @@ class OperationLog:
                     "chunk_index": chunk_index,
                 },
             )
-            response = await transport.request(leader_node_id, msg, timeout=10.0)
-            if response is None:
-                return False
-            if str(response.payload.get("mode", "")) != "chunk":
-                return False
-            chunk_b64 = response.payload.get("chunk_b64")
-            if not isinstance(chunk_b64, str) or not chunk_b64:
-                return False
-            try:
-                buffer.extend(base64.b64decode(chunk_b64.encode("ascii")))
-            except Exception:
-                return False
+            requests.append((chunk_index, msg))
+
+        # Download in parallel batches to reduce round-trips (B8 fix).
+        # Each batch fans out up to 8 concurrent requests, then we collect
+        # and validate before proceeding to the next batch.
+        BATCH = 8
+        buffer = bytearray()
+        for batch_start in range(0, len(requests), BATCH):
+            batch = requests[batch_start:batch_start + BATCH]
+            tasks = [
+                transport.request(leader_node_id, msg, timeout=10.0)
+                for _, msg in batch
+            ]
+            responses = await asyncio.gather(*tasks)
+            for (chunk_index, _msg), response in zip(batch, responses):
+                if response is None:
+                    logger.warning(
+                        "op_log full-resync chunk %d/%d timed out",
+                        chunk_index + 1, chunk_count,
+                    )
+                    return False
+                if str(response.payload.get("mode", "")) != "chunk":
+                    return False
+                chunk_b64 = response.payload.get("chunk_b64")
+                if not isinstance(chunk_b64, str) or not chunk_b64:
+                    return False
+                try:
+                    buffer.extend(base64.b64decode(chunk_b64.encode("ascii")))
+                except Exception:
+                    return False
 
         digest = hashlib.sha256(bytes(buffer)).hexdigest()
         if expected_sha256 and digest != expected_sha256:
@@ -451,6 +472,8 @@ class OperationLog:
             return False
 
     async def _fallback_full_resync_ops(self, leader_node_id: str, transport: Any) -> None:
+        # Save pending ops before destructive resync to avoid data loss (B5 fix).
+        pending = self.get_pending_ops()
         request_id = self._resync_request_id(self.node_id, "ops")
         msg = Message.build(
             message_type=MessageType.OPLOG_FULL_RESYNC,
@@ -466,6 +489,18 @@ class OperationLog:
             self._conn.execute("DELETE FROM op_log")
             self._conn.commit()
         self.apply_acked(ops)
+        # Re-insert saved pending ops so they survive the resync and can be
+        # re-pushed to the leader in the next sync cycle.
+        if pending:
+            for op in pending:
+                try:
+                    self.append_local(
+                        str(op.get("entity", "registry")),
+                        str(op.get("key", "")),
+                        op.get("value"),
+                    )
+                except Exception:
+                    pass
 
     def export_sqlite_snapshot_b64(self) -> str:
         """Create a consistent SQLite snapshot via backup() and return base64 bytes."""
@@ -497,7 +532,12 @@ class OperationLog:
         return chunks, digest
 
     def restore_sqlite_snapshot_b64(self, snapshot_b64: str) -> None:
-        """Replace local DB with leader snapshot, then reopen connection safely."""
+        """Replace local DB with leader snapshot, then reopen connection safely.
+
+        Pending ops that have not yet been acked by the leader are preserved
+        across the restore so they can be re-pushed in the next sync cycle (B5 fix).
+        """
+        pending = self.get_pending_ops()
         payload = base64.b64decode(snapshot_b64.encode("ascii"))
         target = Path(self.db_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -508,6 +548,17 @@ class OperationLog:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._init_schema(self._leader_epoch())
+
+        if pending:
+            for op in pending:
+                try:
+                    self.append_local(
+                        str(op.get("entity", "registry")),
+                        str(op.get("key", "")),
+                        op.get("value"),
+                    )
+                except Exception:
+                    pass
 
     def _latest_acked_for_key(self, entity: str, key: str) -> dict[str, Any] | None:
         with self._lock:

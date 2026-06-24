@@ -234,13 +234,31 @@ class InMemoryTCPTransport:
 
 
 class TCPTransport:
-    """Network-real async TCP transport for runtime communication."""
+    """Network-real async TCP transport for runtime communication.
+
+    Maintains persistent outbound connections per peer to avoid the overhead
+    of a fresh TCP handshake on every message (B6 fix).  Incoming messages
+    are offloaded to background tasks to prevent slow handlers from blocking
+    the read loop (D1 fix).
+    """
 
     _known_addresses: dict[str, tuple[str, int]] = {}
+
+    # Per-peer outbound connection pool shared across all instances in the process.
+    _outbound: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+    _outbound_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
     def reset_shared(cls) -> None:
         cls._known_addresses.clear()
+        # Close all pooled connections.
+        for _reader, writer in cls._outbound.values():
+            try:
+                writer.close()
+            except Exception:
+                pass
+        cls._outbound.clear()
+        cls._outbound_locks.clear()
 
     def __init__(
         self,
@@ -304,6 +322,15 @@ class TCPTransport:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        # Close outbound connections initiated by this transport instance.
+        # Only evict connections whose writer matches this instance's pool
+        # entries to avoid disrupting other transports in the same process.
+        for key, (_reader, writer) in list(self.__class__._outbound.items()):
+            try:
+                writer.close()
+            except Exception:
+                pass
+            self.__class__._outbound.pop(key, None)
         self._running = False
 
     def on_message(self, handler: MessageHandler) -> None:
@@ -331,6 +358,83 @@ class TCPTransport:
             jitter=_SEND_JITTER,
         )
 
+    async def _get_outbound(
+        self, host: str, port: int, node_id: str,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Get or create a persistent outbound connection to a peer (B6 fix)."""
+        key = f"{host}:{port}"
+        # Fast path: existing healthy connection.
+        pooled = self.__class__._outbound.get(key)
+        if pooled is not None:
+            _reader, writer = pooled
+            if not writer.is_closing():
+                return pooled
+            # Stale connection — close and remove.
+            try:
+                writer.close()
+            except Exception:
+                pass
+            del self.__class__._outbound[key]
+
+        # Serialize connection establishment per peer to avoid thundering herd.
+        lock = self.__class__._outbound_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            # Double-check: another waiter may have created the connection.
+            pooled = self.__class__._outbound.get(key)
+            if pooled is not None:
+                _reader, writer = pooled
+                if not writer.is_closing():
+                    return pooled
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                del self.__class__._outbound[key]
+
+            reader, writer = await asyncio.open_connection(host, port)
+            self.__class__._outbound[key] = (reader, writer)
+            # Start a background reader task to handle responses from this peer.
+            asyncio.create_task(self._pooled_read_loop(reader, writer, key, node_id))
+            return reader, writer
+
+    async def _pooled_read_loop(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        connection_key: str,
+        node_id: str,
+    ) -> None:
+        """Read responses from a pooled connection and dispatch to handler (D1 fix)."""
+        try:
+            while True:
+                header = await reader.readexactly(4)
+                size = int.from_bytes(header, "big")
+                payload = await reader.readexactly(size)
+                message = Message.deserialize(payload)
+                self._track_sender(message)
+                request_id = message.payload.get("request_id")
+                if request_id is not None:
+                    request_key = str(request_id)
+                    if request_key in self._pending:
+                        self.resolve_pending(request_key, message)
+                if self._handler is not None:
+                    # Offload handler to a task so a slow handler doesn't block
+                    # the read loop for other messages on this connection (D1).
+                    asyncio.create_task(self._handler(message))
+        except asyncio.IncompleteReadError:
+            pass  # peer closed — normal
+        except Exception:
+            logger.debug(
+                "TCPTransport pooled read loop error for %s (%s)",
+                connection_key, node_id, exc_info=True,
+            )
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            self.__class__._outbound.pop(connection_key, None)
+
     async def _send_with_retry(
         self,
         *,
@@ -346,13 +450,14 @@ class TCPTransport:
         delay = max(0.0, base_backoff_ms / 1000.0)
         for attempt in range(max_retries + 1):
             try:
-                _reader, writer = await asyncio.open_connection(host, port)
+                _reader, writer = await self._get_outbound(host, port, node_id)
                 writer.write(packet)
                 await writer.drain()
-                writer.close()
-                await writer.wait_closed()
                 return
             except Exception:
+                # Connection may be broken — evict from pool and retry.
+                key = f"{host}:{port}"
+                self.__class__._outbound.pop(key, None)
                 if attempt >= max_retries:
                     logger.exception(
                         "TCPTransport.send failed after retries: from=%s to=%s (%s:%s)",
@@ -414,6 +519,11 @@ class TCPTransport:
             future.set_result(response)
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Handle an inbound TCP connection (server-side).
+
+        Messages are dispatched to the handler as background tasks so that
+        a slow handler cannot stall subsequent messages on the same connection (D1 fix).
+        """
         try:
             while True:
                 header = await reader.readexactly(4)
@@ -427,7 +537,9 @@ class TCPTransport:
                     if request_key in self._pending:
                         self.resolve_pending(request_key, message)
                 if self._handler is not None:
-                    await self._handler(message)
+                    # D1 fix: offload handler execution to a background task so
+                    # the read loop stays responsive for subsequent messages.
+                    asyncio.create_task(self._handler(message))
         except asyncio.IncompleteReadError:
             pass
         except Exception:

@@ -380,8 +380,8 @@ class ClusterRuntime:
             }
             for n in writers
         ]
-        all_nodes = await self.registry.get_write_nodes()
-        all_nodes += await self.registry.get_read_nodes()
+        read_nodes = await self.registry.get_read_nodes()
+        all_nodes = list(writers) + list(read_nodes)
         members_payload = [
             {
                 "node_id": n.node_id,
@@ -452,6 +452,10 @@ class ClusterRuntime:
             fields["leader_node_id"] = leader_node_id
             fields["is_leader"] = False
             self.config = RuntimeConfig(**fields)
+            # B4 fix: re-sync coordinator state after config rebuild so the write
+            # guard sees the updated leader identity.
+            self.coordinator._is_leader = False
+            self.coordinator._leader_node_id = leader_node_id
 
         if self.config.is_leader or self.op_log is None:
             return
@@ -784,6 +788,7 @@ class ClusterRuntime:
                     sender_region=self.config.region,
                     payload={
                         "leader_node_id": self.config.node_id,
+                        "leader_last_op_id": self.op_log.get_last_acked_op_id() if self.op_log is not None else None,
                         "members": membership_payload,
                     },
                 )
