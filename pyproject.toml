@@ -60,6 +60,9 @@ redis = [
 mysql = [
     "pymysql>=1.1",
 ]
+minio = [
+    "minio>=7.2",
+]
 all = [
     "openpyxl>=3.1",
     "python-calamine>=0.2",
@@ -67,6 +70,7 @@ all = [
     "aioquic>=1.2",
     "redis>=5.0",
     "pymysql>=1.1",
+    "minio>=7.2",
     "psutil>=5.9",
 ]
 

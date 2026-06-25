@@ -23,6 +23,7 @@ from .tcp_transport import TCPTransport
 from .replication import ReplicationManager
 from .registry import NodeInfo as MemNodeInfo
 from .sqlite_registry import NodeInfo as SQLiteNodeInfo
+from .minio_storage import MinioDataDir, create_data_dir
 from .op_log import OperationLog
 
 
@@ -64,6 +65,15 @@ class RuntimeConfig:
     sync_interval_ms: int = 1000
     push_threshold_ops: int = 100
     full_resync_threshold_ops: int = 20000
+    # MinIO data directory
+    data_dir_backend: str = "local"  # local | minio
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_bucket: str = "hiveframe"
+    minio_secure: bool = False
+    minio_region: str = "us-east-1"
+    minio_prefix: str = "hiveframe/"
     # Observability
     metrics_enabled: bool = True
     audit_log_path: str | None = None
@@ -167,6 +177,26 @@ class ClusterRuntime:
         self._audit_log_path = Path(config.audit_log_path) if config.audit_log_path else None
         self._audit_log_max_bytes = max(0, int(config.audit_log_max_bytes))
         self._audit_log_backup_count = max(0, int(config.audit_log_backup_count))
+        self._minio: MinioDataDir | None = None
+        if config.data_dir_backend == "minio":
+            self._minio = MinioDataDir(
+                endpoint=config.minio_endpoint,
+                access_key=config.minio_access_key,
+                secret_key=config.minio_secret_key,
+                bucket=config.minio_bucket,
+                secure=config.minio_secure,
+                region=config.minio_region,
+                prefix=config.minio_prefix,
+            )
+            logger.info("MinIO data directory enabled: bucket=%s prefix=%s", config.minio_bucket, config.minio_prefix)
+            # Restore registry DB from MinIO if local doesn't exist yet
+            db_path = Path(config.db_path)
+            if not db_path.exists() and config.registry_backend == "sqlite":
+                try:
+                    db_object = f"registry/{config.node_id}.db"
+                    self._minio.restore_db(db_path, db_object)
+                except Exception as exc:
+                    logger.info("No MinIO registry backup found for node %s: %s", config.node_id, exc)
         self._resync_snapshot_cache: dict[str, Any] | None = None
         self.op_log: OperationLog | None = None
         if config.enable_cluster:
@@ -1006,6 +1036,27 @@ class ClusterRuntime:
         await self.coordinator.stop_wal_replay()
         if self.op_log is not None:
             self.op_log.close()
+        # Sync registry and op-log databases to MinIO on clean shutdown
+        if self._minio is not None:
+            await self._sync_databases_to_minio()
+
+    async def _sync_databases_to_minio(self) -> None:
+        """Upload local registry and op-log databases to MinIO object storage."""
+        if self._minio is None:
+            return
+        try:
+            node_id = self.config.node_id
+            # Sync registry DB
+            registry_object = f"registry/{node_id}.db"
+            self._minio.sync_db(self.config.db_path, registry_object)
+            logger.info("Synced registry DB to MinIO: %s", registry_object)
+            # Sync op-log DB (same db_path for SQLite-backed op-log)
+            if self.op_log is not None:
+                oplog_object = f"oplog/{node_id}.db"
+                self._minio.sync_db(self.config.db_path, oplog_object)
+                logger.info("Synced op-log DB to MinIO: %s", oplog_object)
+        except Exception as exc:
+            logger.warning("Failed to sync databases to MinIO: %s", exc)
 
     def route_write(self, row_index: int):
         """Return the NodeInfo that owns the given row index based on current partition map.

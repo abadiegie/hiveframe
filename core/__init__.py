@@ -6,6 +6,7 @@
 from .cluster_runtime import ClusterRuntime, RuntimeConfig
 from .dataframe import DFrame, read
 from .message import Message, MessageType
+from .minio_storage import MinioDataDir, create_data_dir
 from .op_log import OperationLog
 from .registry import ClusterRegistry, NodeInfo
 
@@ -15,8 +16,10 @@ __all__ = [
     "DFrame",
     "Message",
     "MessageType",
+    "MinioDataDir",
     "OperationLog",
     "NodeInfo",
     "RuntimeConfig",
+    "create_data_dir",
     "read",
 ]
