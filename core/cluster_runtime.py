@@ -25,6 +25,7 @@ from .registry import NodeInfo as MemNodeInfo
 from .sqlite_registry import NodeInfo as SQLiteNodeInfo
 from .minio_storage import MinioDataDir, create_data_dir
 from .op_log import OperationLog
+from .read_node import ReadNode
 from .wal import MinioWriteAheadLog
 
 
