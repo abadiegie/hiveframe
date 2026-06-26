@@ -224,6 +224,9 @@ class ReadNode:
 
     @staticmethod
     def _parse_cell_id(cell_id: str) -> tuple[str, int]:
+        # Special bulk operation markers — skip during replay
+        if cell_id.endswith("::__bulk_init__") or cell_id.endswith("::__bulk_chunk__"):
+            return ("__bulk__", -1)
         if "_" not in cell_id:
             raise ValueError(f"Invalid cell_id format: {cell_id}")
         col, row = cell_id.rsplit("_", 1)
