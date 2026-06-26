@@ -49,6 +49,9 @@ class WriteNode:
                 delta: list[dict[str, Any]] = []
                 for op in transaction.operations:
                     col, row_idx = self._parse_cell_id(op.cell_id)
+                    # Skip bulk operation markers — not real cell writes
+                    if row_idx < 0:
+                        continue
                     self._ensure_row(row_idx)
                     if col not in self._df.columns:
                         self._df[col] = [None] * len(self._df.index)
