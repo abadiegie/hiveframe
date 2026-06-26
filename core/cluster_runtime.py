@@ -26,7 +26,7 @@ from .sqlite_registry import NodeInfo as SQLiteNodeInfo
 from .minio_storage import MinioDataDir, create_data_dir
 from .op_log import OperationLog
 from .read_node import ReadNode
-from .wal import MinioWriteAheadLog
+from .wal import MinioWriteAheadLog, create_default_wal
 
 
 logger = logging.getLogger("core.cluster_runtime")
@@ -142,7 +142,7 @@ class ClusterRuntime:
                 _prev = _os.environ.get("HIVEFRAME_WAL_BACKEND")
                 try:
                     _os.environ["HIVEFRAME_WAL_BACKEND"] = _wal_choice
-                    wal = TransactionCoordinator._build_default_wal()
+                    wal = create_default_wal()
                 finally:
                     if _prev is not None:
                         _os.environ["HIVEFRAME_WAL_BACKEND"] = _prev
