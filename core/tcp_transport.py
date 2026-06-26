@@ -277,6 +277,7 @@ class TCPTransport:
         self._handler: MessageHandler | None = None
         self._pending: dict[str, asyncio.Future[Message]] = {}
         self._connected_nodes: set[str] = set()
+        self._dead_nodes: set[str] = set()  # permanently dead peers
         self._peers: dict[str, tuple[str, int]] = {}
         self._server: asyncio.AbstractServer | None = None
         self._running = False
@@ -317,6 +318,7 @@ class TCPTransport:
         for node_id, addr in self.__class__._known_addresses.items():
             if addr == (host, port):
                 self._connected_nodes.add(node_id)
+                self._dead_nodes.discard(node_id)
                 self._peers[node_id] = addr
                 break
         return object()
@@ -341,10 +343,8 @@ class TCPTransport:
         self._handler = handler
 
     async def send(self, node_id: str, message: Message) -> None:
-        # Skip known-dead peers to avoid repeated connection refused errors
-        if node_id not in self._connected_nodes and self._connected_nodes:
-            # If connected_nodes is empty, we haven't connected yet — allow first attempt
-            return
+        if node_id in self._dead_nodes:
+            return  # known-dead peer, skip silently
         target = self._resolve_target(node_id)
         if target is None:
             logger.debug("TCPTransport.send: peer not found for node=%s", node_id)
@@ -471,6 +471,7 @@ class TCPTransport:
                         "TCPTransport.send failed after %d retries: from=%s to=%s (%s:%s) — marking peer as dead",
                         max_retries, self.node_id, node_id, host, port,
                     )
+                    self._dead_nodes.add(node_id)
                     self._connected_nodes.discard(node_id)
                     return
                 sleep_for = min(delay, max_backoff_ms / 1000.0)
