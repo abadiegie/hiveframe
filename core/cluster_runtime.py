@@ -77,6 +77,7 @@ class RuntimeConfig:
     minio_region: str = "us-east-1"
     minio_prefix: str = "hiveframe/"
     minio_sync_interval_s: float = 60.0
+    wal_backend: str = ""  # memory | redis | minio — empty = auto (minio when data_dir=minio)
     # Observability
     metrics_enabled: bool = True
     audit_log_path: str | None = None
@@ -124,11 +125,22 @@ class ClusterRuntime:
         if coordinator is not None:
             self.coordinator = coordinator
         else:
-            # If MinIO is configured, inject MinioWriteAheadLog and MinIO-aware ReadNode
+            # WAL selection: wal_backend overrides auto-detection
             minio_wal = None
             read_node = None
-            if self._minio is not None:
+            _wal_choice = (config.wal_backend or "").strip().lower()
+            if _wal_choice == "redis":
+                from .wal import RedisWriteAheadLog as _RedisWAL
+                _redis_url = getattr(config, "minio_endpoint", "")  # not used; read from env
+                import os as _os
+                _rurl = _os.getenv("HIVEFRAME_REDIS_URL", "redis://127.0.0.1:6379/1")
+                _rprefix = _os.getenv("HIVEFRAME_WAL_REDIS_PREFIX", "hiveframe:wal")
+                minio_wal = _RedisWAL(redis_url=_rurl, prefix=_rprefix)
+            elif _wal_choice in ("", "minio") and self._minio is not None:
                 minio_wal = MinioWriteAheadLog(self._minio, config.node_id)
+            # else: no WAL override — coordinator default
+
+            if self._minio is not None:
                 read_node = ReadNode(
                     minio_data_dir=self._minio,
                     node_id=config.node_id,
