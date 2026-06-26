@@ -948,7 +948,17 @@ def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAhead
             table_name=mysql_table,
             auto_create_db=auto_create_db,
         )
+    if backend == "minio":
+        from .minio_storage import create_data_dir as _create_data_dir
+        _minio = _create_data_dir()
+        if _minio is None:
+            raise ValueError(
+                "HIVEFRAME_WAL_BACKEND=minio requires HIVEFRAME_DATA_DIR_BACKEND=minio"
+            )
+        _node_id = os.getenv("CLUSTER_NODE_ID", "standalone")
+        return MinioWriteAheadLog(_minio, _node_id)
+
     raise ValueError(
-        f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis|mysql."
+        f"Unknown HIVEFRAME_WAL_BACKEND='{backend}'. Use memory|file|redis|mysql|minio."
     )
 

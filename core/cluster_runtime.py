@@ -125,20 +125,33 @@ class ClusterRuntime:
         if coordinator is not None:
             self.coordinator = coordinator
         else:
-            # WAL selection: wal_backend overrides auto-detection
-            minio_wal = None
+            # WAL selection: wal_backend overrides auto-detection.
+            # All backends supported: memory, file, redis, mysql, minio.
+            # Empty = auto: minio when data_dir=minio, else coordinator default.
+            wal = None
             read_node = None
             _wal_choice = (config.wal_backend or "").strip().lower()
-            if _wal_choice == "redis":
-                from .wal import RedisWriteAheadLog as _RedisWAL
-                _redis_url = getattr(config, "minio_endpoint", "")  # not used; read from env
+
+            if _wal_choice == "minio":
+                if self._minio is not None:
+                    wal = MinioWriteAheadLog(self._minio, config.node_id)
+            elif _wal_choice in ("redis", "file", "mysql", "memory"):
+                # Delegate to create_default_wal via env vars. Set the env
+                # temporarily so create_default_wal picks up the right backend.
                 import os as _os
-                _rurl = _os.getenv("HIVEFRAME_REDIS_URL", "redis://127.0.0.1:6379/1")
-                _rprefix = _os.getenv("HIVEFRAME_WAL_REDIS_PREFIX", "hiveframe:wal")
-                minio_wal = _RedisWAL(redis_url=_rurl, prefix=_rprefix)
-            elif _wal_choice in ("", "minio") and self._minio is not None:
-                minio_wal = MinioWriteAheadLog(self._minio, config.node_id)
-            # else: no WAL override — coordinator default
+                _prev = _os.environ.get("HIVEFRAME_WAL_BACKEND")
+                try:
+                    _os.environ["HIVEFRAME_WAL_BACKEND"] = _wal_choice
+                    wal = TransactionCoordinator._build_default_wal()
+                finally:
+                    if _prev is not None:
+                        _os.environ["HIVEFRAME_WAL_BACKEND"] = _prev
+                    else:
+                        _os.environ.pop("HIVEFRAME_WAL_BACKEND", None)
+            elif self._minio is not None:
+                # Auto: MinIO configured → use MinioWriteAheadLog
+                wal = MinioWriteAheadLog(self._minio, config.node_id)
+            # else: wal remains None → coordinator uses default WAL
 
             if self._minio is not None:
                 read_node = ReadNode(
@@ -146,7 +159,7 @@ class ClusterRuntime:
                     node_id=config.node_id,
                 )
             self.coordinator = TransactionCoordinator(
-                wal=minio_wal,
+                wal=wal,
                 read_node=read_node,
             )
 
@@ -198,7 +211,11 @@ class ClusterRuntime:
 
         # Transport selection
         if config.transport_backend == "tcp":
-            self.transport = TCPTransport(host=config.host, port=config.port, node_id=config.node_id)
+            self.transport = TCPTransport(
+            host=config.host, port=config.port, node_id=config.node_id,
+            send_max_retries=config.send_max_retries,
+            send_base_backoff_ms=config.send_base_backoff_ms,
+        )
         else:
             from .quic_transport import QuicTransport
 

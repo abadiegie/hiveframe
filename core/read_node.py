@@ -188,6 +188,7 @@ class ReadNode:
             return 0
 
         count = 0
+        loaded = 0
         for obj_name in objects:
             # Extract just the filename portion after the prefix
             relative = obj_name
@@ -201,11 +202,18 @@ class ReadNode:
             try:
                 self._minio.download_file(f"{prefix}{relative}", local_path)
                 count += 1
+                # Load into in-memory cache so queries return actual data
+                name = relative[:-len(".parquet")]
+                self.load(name)
+                loaded += 1
                 logger.info("ReadNode.restore_all: restored %s", relative)
             except Exception as exc:
                 logger.warning("ReadNode.restore_all: failed to download %s: %s", relative, exc)
 
-        logger.info("ReadNode.restore_all_from_minio: restored %d parquet files", count)
+        logger.info(
+            "ReadNode.restore_all_from_minio: downloaded %d parquet files, loaded %d into cache",
+            count, loaded,
+        )
         return count
 
     @property

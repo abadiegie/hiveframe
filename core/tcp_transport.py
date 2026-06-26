@@ -266,10 +266,14 @@ class TCPTransport:
         port: int = 19100,
         *,
         node_id: str | None = None,
+        send_max_retries: int = _SEND_MAX_RETRIES,
+        send_base_backoff_ms: int = _SEND_BASE_BACKOFF_MS,
     ) -> None:
         self.host = host
         self.port = port
         self.node_id = node_id or f"tcp://{host}:{port}"
+        self.send_max_retries = send_max_retries
+        self.send_base_backoff_ms = send_base_backoff_ms
         self._handler: MessageHandler | None = None
         self._pending: dict[str, asyncio.Future[Message]] = {}
         self._connected_nodes: set[str] = set()
@@ -287,7 +291,7 @@ class TCPTransport:
             await self._server.wait_closed()
         self.host = host
         self.port = port
-        self._server = await asyncio.start_server(self._handle_client, host, port)
+        self._server = await asyncio.start_server(self._handle_client, host, port, reuse_address=True)
         self._running = True
         self.register_peer(self.node_id, host, port)
         logger.info("TCPTransport listening on %s:%s as node_id=%s", host, port, self.node_id)
@@ -352,8 +356,8 @@ class TCPTransport:
             host=host,
             port=port,
             packet=packet,
-            max_retries=_SEND_MAX_RETRIES,
-            base_backoff_ms=_SEND_BASE_BACKOFF_MS,
+            max_retries=self.send_max_retries,
+            base_backoff_ms=self.send_base_backoff_ms,
             max_backoff_ms=_SEND_MAX_BACKOFF_MS,
             jitter=_SEND_JITTER,
         )

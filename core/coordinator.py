@@ -101,6 +101,7 @@ class TransactionCoordinator:
         replay_env = os.getenv("HIVEFRAME_WAL_REPLAY_ENABLED")
         if replay_env is None:
             self._wal_replay_enabled = self.wal.__class__.__name__ in {
+                "WriteAheadLog",          # file-backed WAL
                 "RedisWriteAheadLog",
                 "MySQLWriteAheadLog",
                 "MinioWriteAheadLog",
