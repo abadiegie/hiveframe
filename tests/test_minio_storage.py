@@ -89,6 +89,21 @@ class _FakeMinioClient:
     def remove_object(self, bucket_name: str, object_name: str) -> None:
         self._buckets.get(bucket_name, {}).pop(object_name, None)
 
+    def stat_object(self, bucket_name: str, object_name: str) -> Any:
+        """Return a fake stat result or raise if object not found."""
+        bucket = self._buckets.get(bucket_name, {})
+        if object_name not in bucket:
+            raise Exception("Object does not exist")
+        data = bucket[object_name]
+
+        class _FakeStat:
+            pass
+
+        stat = _FakeStat()
+        stat.object_name = object_name  # type: ignore[attr-defined]
+        stat.size = len(data)  # type: ignore[attr-defined]
+        return stat
+
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -298,3 +313,383 @@ def test_create_data_dir_unknown_raises(monkeypatch) -> None:
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "Unknown HIVEFRAME_DATA_DIR_BACKEND" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# JSON helper tests
+# ---------------------------------------------------------------------------
+
+
+def test_upload_download_json() -> None:
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    payload = {"hello": "world", "count": 42}
+    obj = dd.upload_json(payload, "data/config.json")
+    assert obj in client._buckets["test-bucket"]
+
+    result = dd.download_json("data/config.json")
+    assert result == payload
+
+
+def test_download_json_missing() -> None:
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    result = dd.download_json("nonexistent/key.json")
+    assert result is None
+
+
+def test_object_exists() -> None:
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    dd.upload_bytes(b"data", "present.txt")
+    assert dd.object_exists("present.txt") is True
+    assert dd.object_exists("missing.txt") is False
+
+
+# ---------------------------------------------------------------------------
+# MinioWriteAheadLog tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_tx(tx_id: str = "tx-1", cell_id: str = "col_0",
+                  old_value: Any = None, new_value: Any = "new-val",
+                  state: str = "COMMITTED") -> Any:
+    """Build a minimal Transaction-like object for WAL testing."""
+    from core.transaction import Transaction, Operation, TxState
+
+    op = Operation(
+        cell_id=cell_id,
+        old_value=old_value,
+        new_value=new_value,
+        author_type="human",
+        author_id="test",
+    )
+    tx = Transaction(operations=[op], tx_id=tx_id)
+    # Walk the state machine to the desired state
+    tx.transition(TxState.VALIDATING)
+    tx.transition(TxState.LOCKED)
+    tx.transition(TxState.APPLYING)
+    tx.transition(TxState.COMMITTED)
+    if state == "SYNCED":
+        tx.transition(TxState.SYNCING)
+        tx.transition(TxState.SYNCED)
+    return tx
+
+
+def test_minio_wal_append_and_get_since() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-1")
+    assert wal.get_metrics()["total_entries"] == 0
+
+    tx1 = _make_fake_tx("tx-1", new_value="a")
+    tx2 = _make_fake_tx("tx-2", new_value="b")
+    tx3 = _make_fake_tx("tx-3", new_value="c")
+
+    lsn1 = wal.append(tx1)
+    lsn2 = wal.append(tx2)
+    lsn3 = wal.append(tx3)
+    assert lsn1 == 1
+    assert lsn2 == 2
+    assert lsn3 == 3
+
+    # get_since from 0 returns all
+    since_0 = wal.get_since(0)
+    assert len(since_0) == 3
+
+    # get_since from 1 returns last two
+    since_1 = wal.get_since(1)
+    assert len(since_1) == 2
+    assert since_1[0]["lsn"] == 2
+    assert since_1[1]["lsn"] == 3
+
+
+def test_minio_wal_recovery() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    # Create WAL, append entries, then simulate restart
+    wal1 = MinioWriteAheadLog(dd, node_id="node-2")
+    wal1.append(_make_fake_tx("tx-a", new_value="x"))
+    wal1.append(_make_fake_tx("tx-b", new_value="y"))
+
+    # Second instance should recover from MinIO
+    wal2 = MinioWriteAheadLog(dd, node_id="node-2")
+    metrics = wal2.get_metrics()
+    assert metrics["total_entries"] == 2
+    assert metrics["last_lsn"] == 2
+
+    since = wal2.get_since(0)
+    assert len(since) == 2
+    assert since[0]["tx_id"] == "tx-a"
+    assert since[1]["tx_id"] == "tx-b"
+
+
+def test_minio_wal_compact() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-3")
+    for i in range(10):
+        wal.append(_make_fake_tx(f"tx-{i}", new_value=str(i)))
+
+    assert wal.get_metrics()["total_entries"] == 10
+
+    removed = wal.compact(keep_last_n=3)
+    assert removed == 7
+    assert wal.get_metrics()["total_entries"] == 3
+
+    # Remaining entries have the highest LSNs
+    since = wal.get_since(0)
+    assert len(since) == 3
+    lsns = [e["lsn"] for e in since]
+    assert lsns == [8, 9, 10]
+
+
+def test_minio_wal_compact_before_lsn() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-4")
+    for i in range(5):
+        wal.append(_make_fake_tx(f"tx-{i}", new_value=str(i)))
+
+    removed = wal.compact_before_lsn(3)
+    assert removed == 2  # lsns 1 and 2
+
+    since = wal.get_since(0)
+    assert len(since) == 3
+    assert since[0]["lsn"] == 3
+
+
+def test_minio_wal_get_committed() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-5")
+    wal.append(_make_fake_tx("tx-c1", new_value="c1", state="COMMITTED"))
+    wal.append(_make_fake_tx("tx-c2", new_value="c2", state="SYNCED"))
+
+    committed = wal.get_committed()
+    assert len(committed) == 2
+    assert committed[0]["tx_id"] == "tx-c1"
+    assert committed[1]["tx_id"] == "tx-c2"
+
+
+def test_minio_wal_cell_history() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-6")
+    wal.append(_make_fake_tx("tx-h1", cell_id="price_0", old_value=None, new_value=100))
+    wal.append(_make_fake_tx("tx-h2", cell_id="price_0", old_value=100, new_value=110))
+    wal.append(_make_fake_tx("tx-h3", cell_id="qty_0", old_value=None, new_value=5))
+
+    history = wal.get_cell_history("price_0")
+    assert len(history) == 2
+    assert history[0]["old_value"] is None
+    assert history[0]["new_value"] == 100
+    assert history[1]["old_value"] == 100
+    assert history[1]["new_value"] == 110
+
+
+def test_minio_wal_get_metrics() -> None:
+    from core.wal import MinioWriteAheadLog
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    wal = MinioWriteAheadLog(dd, node_id="node-7")
+    assert wal.get_metrics() == {"total_entries": 0, "last_lsn": 0}
+
+    wal.append(_make_fake_tx("tx-a", new_value="a"))
+    wal.append(_make_fake_tx("tx-b", new_value="b"))
+
+    metrics = wal.get_metrics()
+    assert metrics["total_entries"] == 2
+    assert metrics["last_lsn"] == 2
+
+
+# ---------------------------------------------------------------------------
+# ReadNode MinIO integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_read_node_persist_to_minio(tmp_path: Path) -> None:
+    import pandas as pd
+    from core.read_node import ReadNode
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    storage_dir = tmp_path / "dframe_store"
+    rn = ReadNode(storage_dir=str(storage_dir), minio_data_dir=dd, node_id="test-node")
+
+    # Put data into cache and persist
+    rn._cache = pd.DataFrame({"col_a": [1, 2, 3], "col_b": ["x", "y", "z"]})
+    rn.persist("mydataset")
+
+    # Verify local parquet exists
+    local_path = storage_dir / "mydataset.parquet"
+    assert local_path.exists()
+
+    # Verify MinIO upload
+    expected_obj = "parquet/test-node/mydataset.parquet"
+    all_objects = dd.list_objects()
+    full_key = dd._object_name(expected_obj)
+    assert any(full_key in o for o in all_objects) or any(
+        o.endswith("mydataset.parquet") for o in all_objects
+    ), f"Expected parquet object in MinIO, got: {all_objects}"
+
+
+def test_read_node_load_from_minio(tmp_path: Path) -> None:
+    import pandas as pd
+    from core.read_node import ReadNode
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    storage_dir = tmp_path / "dframe_store"
+
+    # Pre-populate: persist via one ReadNode instance
+    rn1 = ReadNode(storage_dir=str(storage_dir), minio_data_dir=dd, node_id="node-a")
+    rn1._cache = pd.DataFrame({"val": [10, 20]})
+    rn1.persist("dataset_x")
+
+    # Delete local file to simulate cold start / remote node
+    local_path = storage_dir / "dataset_x.parquet"
+    local_path.unlink()
+    assert not local_path.exists()
+
+    # Second ReadNode loads — should pull from MinIO
+    rn2 = ReadNode(storage_dir=str(storage_dir), minio_data_dir=dd, node_id="node-a")
+    frame = rn2.load("dataset_x")
+    assert frame is not None
+    assert list(frame["val"]) == [10, 20]
+    assert local_path.exists()  # downloaded locally
+
+
+def test_read_node_restore_all_from_minio(tmp_path: Path) -> None:
+    import pandas as pd
+    from core.read_node import ReadNode
+
+    client = _FakeMinioClient()
+    dd = MinioDataDir(
+        endpoint="localhost:9000",
+        access_key="ak",
+        secret_key="sk",
+        bucket="test-bucket",
+        minio_client=client,
+    )
+
+    storage_dir = tmp_path / "dframe_store"
+    rn1 = ReadNode(storage_dir=str(storage_dir), minio_data_dir=dd, node_id="node-b")
+
+    # Persist multiple datasets
+    rn1._cache = pd.DataFrame({"a": [1]})
+    rn1.persist("ds1")
+
+    rn1._cache = pd.DataFrame({"b": [2]})
+    rn1.persist("ds2")
+
+    # Wipe local storage
+    import shutil
+    shutil.rmtree(storage_dir)
+    storage_dir.mkdir()
+
+    # Restore all from MinIO
+    rn2 = ReadNode(storage_dir=str(storage_dir), minio_data_dir=dd, node_id="node-b")
+    count = rn2.restore_all_from_minio()
+    assert count >= 2
+
+    # Verify local files restored
+    assert (storage_dir / "ds1.parquet").exists()
+    assert (storage_dir / "ds2.parquet").exists()

@@ -626,6 +626,292 @@ class MySQLWriteAheadLog:
             }
 
 
+class MinioWriteAheadLog:
+    """MinIO-backed WAL with per-node LSN ordering.
+
+    MinIO is the authoritative durable store — every append uploads a JSON object
+    to ``wal/{node_id}/lsn_{lsn:020d}.json``. A local JSONL file is maintained
+    as a write-through cache so that ``get_since()`` is a fast local read.
+
+    This backend is intended to be instantiated by ``ClusterRuntime`` and injected
+    into ``TransactionCoordinator``.
+    """
+
+    # ------------------------------------------------------------------
+    # Object key helpers (static so they can be reused without an instance)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lsn_key(node_id: str, lsn: int) -> str:
+        return f"wal/{node_id}/lsn_{lsn:020d}.json"
+
+    @staticmethod
+    def _lsn_prefix(node_id: str) -> str:
+        return f"wal/{node_id}/"
+
+    @staticmethod
+    def _parse_lsn_from_key(key: str) -> int | None:
+        """Extract LSN from an object name like 'wal/node-1/lsn_0000000042.json'."""
+        import re as _re_mod
+
+        m = _re_mod.search(r"lsn_(\d+)\.json$", key)
+        if m is None:
+            return None
+        return int(m.group(1))
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    def __init__(
+        self,
+        minio_data_dir: Any,  # MinioDataDir (lazy import to avoid hard dep)
+        node_id: str,
+        local_path: str | None = None,
+    ) -> None:
+        self._lock = Lock()
+        self._minio = minio_data_dir
+        self._node_id = node_id
+        self._local_path = Path(local_path or f".hiveframe/wal_{node_id}.jsonl")
+        self._local_path.parent.mkdir(parents=True, exist_ok=True)
+        self._entries: list[WALEntry] = []
+        self._next_lsn = 1
+
+        # Recover from MinIO (source of truth) on startup
+        self._recover_from_minio()
+        logger.info(
+            "MinioWriteAheadLog initialized node_id=%s entries=%d next_lsn=%d local=%s",
+            node_id,
+            len(self._entries),
+            self._next_lsn,
+            self._local_path,
+        )
+
+    # ------------------------------------------------------------------
+    # Recovery
+    # ------------------------------------------------------------------
+
+    def _recover_from_minio(self) -> None:
+        """Rebuild local state from MinIO objects.
+
+        Lists all ``wal/{node_id}/lsn_*.json`` objects, downloads each,
+        sorts by LSN, writes the local JSONL cache, and sets ``_next_lsn``.
+        """
+        prefix = self._lsn_prefix(self._node_id)
+        try:
+            objects = self._minio.list_objects(prefix)
+        except Exception as exc:
+            logger.warning(
+                "MinioWriteAheadLog: could not list objects at prefix=%s: %s", prefix, exc
+            )
+            return
+
+        if not objects:
+            logger.info("MinioWriteAheadLog: no WAL objects found in MinIO, starting fresh")
+            return
+
+        # Parse LSNs and sort
+        parsed: list[tuple[int, str]] = []
+        for obj_name in objects:
+            # Strip the global MinioDataDir prefix to get the relative key
+            relative = obj_name
+            if relative.startswith(self._minio._prefix):
+                relative = relative[len(self._minio._prefix):]
+            lsn = self._parse_lsn_from_key(relative)
+            if lsn is not None:
+                parsed.append((lsn, relative))
+
+        if not parsed:
+            logger.info("MinioWriteAheadLog: no parseable WAL entries found")
+            return
+
+        parsed.sort(key=lambda item: item[0])
+
+        # Download and rebuild
+        entries: list[WALEntry] = []
+        local_lines: list[str] = []
+        for lsn, relative_key in parsed:
+            try:
+                data = self._minio.download_json(relative_key)
+                if data is None:
+                    continue
+                entry = WALEntry(
+                    lsn=int(data.get("lsn", lsn)),
+                    tx_id=str(data.get("tx_id", "")),
+                    operations=list(data.get("operations", [])),
+                    timestamp=str(data.get("timestamp", "")),
+                    state=str(data.get("state", "")),
+                )
+                entries.append(entry)
+                local_lines.append(json.dumps(entry.to_dict(), separators=(",", ":"), sort_keys=True))
+            except Exception as exc:
+                logger.warning(
+                    "MinioWriteAheadLog: failed to download/parse key=%s: %s", relative_key, exc
+                )
+
+        if entries:
+            self._entries = entries
+            self._next_lsn = max(e.lsn for e in entries) + 1
+            # Rebuild local JSONL cache
+            try:
+                self._local_path.write_text("\n".join(local_lines) + "\n", encoding="utf-8")
+            except Exception as exc:
+                logger.warning("MinioWriteAheadLog: failed to write local cache: %s", exc)
+
+        logger.info(
+            "MinioWriteAheadLog: recovered %d entries from MinIO, next_lsn=%d",
+            len(self._entries),
+            self._next_lsn,
+        )
+
+    # ------------------------------------------------------------------
+    # Core WAL interface
+    # ------------------------------------------------------------------
+
+    def _entry_from_tx(self, lsn: int, transaction: Transaction) -> WALEntry:
+        return WALEntry(
+            lsn=lsn,
+            tx_id=transaction.tx_id,
+            operations=[op.to_dict() for op in transaction.operations],
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            state=transaction.state.value,
+        )
+
+    def append(self, transaction: Transaction) -> int:
+        """Upload entry to MinIO (source of truth), then append to local JSONL cache."""
+        with self._lock:
+            lsn = self._next_lsn
+            self._next_lsn += 1
+            entry = self._entry_from_tx(lsn, transaction)
+            entry_dict = entry.to_dict()
+
+            # 1. Upload to MinIO (source of truth) — MUST succeed
+            key = self._lsn_key(self._node_id, lsn)
+            try:
+                self._minio.upload_json(entry_dict, key)
+            except Exception:
+                # Roll back LSN on failure — the entry was not persisted
+                self._next_lsn = lsn
+                raise
+
+            # 2. Write-through to local JSONL (fast cache)
+            try:
+                with open(self._local_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry_dict, separators=(",", ":"), sort_keys=True) + "\n")
+            except Exception as exc:
+                logger.warning("MinioWriteAheadLog: local cache write failed (non-fatal): %s", exc)
+
+            self._entries.append(entry)
+            logger.info(
+                "MinioWAL.append lsn=%s tx_id=%s state=%s ops=%d",
+                lsn,
+                transaction.tx_id,
+                transaction.state.value,
+                len(entry.operations),
+            )
+            return lsn
+
+    def get_since(self, lsn: int) -> list[dict[str, Any]]:
+        """Return entries with LSN > *lsn* from the local JSONL cache (fast path)."""
+        with self._lock:
+            results = [e.to_dict() for e in self._entries if e.lsn > int(lsn)]
+            logger.debug("MinioWAL.get_since lsn=%s results=%d", lsn, len(results))
+            return results
+
+    def get_committed(self) -> list[dict[str, Any]]:
+        """Return committed / synced entries."""
+        with self._lock:
+            results = [
+                e.to_dict()
+                for e in self._entries
+                if e.state in {TxState.COMMITTED.value, TxState.SYNCED.value}
+            ]
+            logger.debug("MinioWAL.get_committed count=%d", len(results))
+            return results
+
+    def compact(self, keep_last_n: int = 1000) -> int:
+        """Delete old MinIO objects and truncate local state."""
+        with self._lock:
+            if len(self._entries) <= keep_last_n:
+                return 0
+            removed = len(self._entries) - keep_last_n
+            # Delete MinIO objects for removed entries
+            for entry in self._entries[:removed]:
+                key = self._lsn_key(self._node_id, entry.lsn)
+                try:
+                    self._minio.delete_object(key)
+                except Exception as exc:
+                    logger.debug("MinioWAL.compact: delete failed for lsn=%s: %s", entry.lsn, exc)
+            # Truncate in-memory list
+            self._entries = self._entries[-keep_last_n:]
+            # Rewrite local JSONL cache
+            self._rewrite_local_cache()
+            logger.info("MinioWAL.compact: removed %d entries, kept %d", removed, keep_last_n)
+            return removed
+
+    def compact_before_lsn(self, lsn: int) -> int:
+        """Delete all entries with LSN < *lsn* from MinIO and local cache."""
+        with self._lock:
+            before = len(self._entries)
+            removed_entries = [e for e in self._entries if e.lsn < int(lsn)]
+            self._entries = [e for e in self._entries if e.lsn >= int(lsn)]
+            removed = before - len(self._entries)
+            for entry in removed_entries:
+                key = self._lsn_key(self._node_id, entry.lsn)
+                try:
+                    self._minio.delete_object(key)
+                except Exception as exc:
+                    logger.debug(
+                        "MinioWAL.compact_before_lsn: delete failed for lsn=%s: %s", entry.lsn, exc
+                    )
+            if removed:
+                self._rewrite_local_cache()
+            logger.info(
+                "MinioWAL.compact_before_lsn: removed %d entries before lsn %d", removed, lsn
+            )
+            return removed
+
+    def _rewrite_local_cache(self) -> None:
+        """Rewrite the local JSONL file from the in-memory entry list."""
+        try:
+            lines = [
+                json.dumps(e.to_dict(), separators=(",", ":"), sort_keys=True)
+                for e in self._entries
+            ]
+            self._local_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as exc:
+            logger.warning("MinioWriteAheadLog: failed to rewrite local cache: %s", exc)
+
+    def get_cell_history(self, cell_id: str) -> list[dict[str, Any]]:
+        """Return audit trail for a single cell."""
+        with self._lock:
+            history: list[dict[str, Any]] = []
+            for entry in self._entries:
+                for op in entry.operations:
+                    if op.get("cell_id") == cell_id:
+                        history.append(
+                            {
+                                "lsn": entry.lsn,
+                                "timestamp": entry.timestamp,
+                                "tx_id": entry.tx_id,
+                                "old_value": op.get("old_value"),
+                                "new_value": op.get("new_value"),
+                                "author_type": op.get("author_type"),
+                                "author_id": op.get("author_id"),
+                                "confidence": op.get("confidence"),
+                            }
+                        )
+            return history
+
+    def get_metrics(self) -> dict[str, int]:
+        """Return operational metrics."""
+        with self._lock:
+            return {
+                "total_entries": len(self._entries),
+                "last_lsn": self._next_lsn - 1 if self._next_lsn > 0 else 0,
+            }
+
+
 def create_default_wal() -> WriteAheadLog | RedisWriteAheadLog | MySQLWriteAheadLog:
     """Create WAL backend based on environment configuration.
 

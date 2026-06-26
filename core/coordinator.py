@@ -103,6 +103,7 @@ class TransactionCoordinator:
             self._wal_replay_enabled = self.wal.__class__.__name__ in {
                 "RedisWriteAheadLog",
                 "MySQLWriteAheadLog",
+                "MinioWriteAheadLog",
             }
         else:
             self._wal_replay_enabled = replay_env.strip().lower() in {"1", "true", "yes", "on"}

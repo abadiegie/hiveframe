@@ -25,6 +25,7 @@ from .registry import NodeInfo as MemNodeInfo
 from .sqlite_registry import NodeInfo as SQLiteNodeInfo
 from .minio_storage import MinioDataDir, create_data_dir
 from .op_log import OperationLog
+from .wal import MinioWriteAheadLog
 
 
 logger = logging.getLogger("core.cluster_runtime")
@@ -74,6 +75,7 @@ class RuntimeConfig:
     minio_secure: bool = False
     minio_region: str = "us-east-1"
     minio_prefix: str = "hiveframe/"
+    minio_sync_interval_s: float = 60.0
     # Observability
     metrics_enabled: bool = True
     audit_log_path: str | None = None
@@ -88,7 +90,53 @@ class ClusterRuntime:
         self.config = config
         self._validate_leader_config(config)
 
-        self.coordinator = coordinator or TransactionCoordinator()
+        # --- MinIO data directory (created early so all components can use it) ---
+        self._minio: MinioDataDir | None = None
+        self._minio_sync_task: asyncio.Task[None] | None = None
+        if config.data_dir_backend == "minio":
+            self._minio = MinioDataDir(
+                endpoint=config.minio_endpoint,
+                access_key=config.minio_access_key,
+                secret_key=config.minio_secret_key,
+                bucket=config.minio_bucket,
+                secure=config.minio_secure,
+                region=config.minio_region,
+                prefix=config.minio_prefix,
+            )
+            logger.info(
+                "MinIO data directory enabled: bucket=%s prefix=%s",
+                config.minio_bucket,
+                config.minio_prefix,
+            )
+            # Restore registry DB from MinIO if local doesn't exist yet
+            db_path = Path(config.db_path)
+            if not db_path.exists() and config.registry_backend == "sqlite":
+                try:
+                    db_object = f"registry/{config.node_id}.db"
+                    self._minio.restore_db(db_path, db_object)
+                except Exception as exc:
+                    logger.info(
+                        "No MinIO registry backup found for node %s: %s", config.node_id, exc
+                    )
+
+        # --- Build coordinator components with MinIO injection ---
+        if coordinator is not None:
+            self.coordinator = coordinator
+        else:
+            # If MinIO is configured, inject MinioWriteAheadLog and MinIO-aware ReadNode
+            minio_wal = None
+            read_node = None
+            if self._minio is not None:
+                minio_wal = MinioWriteAheadLog(self._minio, config.node_id)
+                read_node = ReadNode(
+                    minio_data_dir=self._minio,
+                    node_id=config.node_id,
+                )
+            self.coordinator = TransactionCoordinator(
+                wal=minio_wal,
+                read_node=read_node,
+            )
+
         # Wire leader config into coordinator for write guard
         self.coordinator._node_id = config.node_id
         self.coordinator._is_leader = config.is_leader
@@ -104,6 +152,19 @@ class ClusterRuntime:
             self.coordinator.set_wal_replay_cursor_path(
                 f".hiveframe/wal_replay_cursor_{config.node_id}.json"
             )
+
+        # --- Bootstrap WriteNode from MinIO snapshot if available ---
+        if self._minio is not None:
+            self._restore_write_node_from_minio()
+
+        # --- Restore ReadNode parquet cache from MinIO ---
+        if self._minio is not None and hasattr(self.coordinator.read_node, "restore_all_from_minio"):
+            try:
+                restored = self.coordinator.read_node.restore_all_from_minio()
+                if restored > 0:
+                    logger.info("Restored %d parquet files from MinIO into ReadNode cache", restored)
+            except Exception as exc:
+                logger.warning("Failed to restore ReadNode parquets from MinIO: %s", exc)
 
         # Registry selection
         if config.registry_backend == "sqlite":
@@ -177,26 +238,6 @@ class ClusterRuntime:
         self._audit_log_path = Path(config.audit_log_path) if config.audit_log_path else None
         self._audit_log_max_bytes = max(0, int(config.audit_log_max_bytes))
         self._audit_log_backup_count = max(0, int(config.audit_log_backup_count))
-        self._minio: MinioDataDir | None = None
-        if config.data_dir_backend == "minio":
-            self._minio = MinioDataDir(
-                endpoint=config.minio_endpoint,
-                access_key=config.minio_access_key,
-                secret_key=config.minio_secret_key,
-                bucket=config.minio_bucket,
-                secure=config.minio_secure,
-                region=config.minio_region,
-                prefix=config.minio_prefix,
-            )
-            logger.info("MinIO data directory enabled: bucket=%s prefix=%s", config.minio_bucket, config.minio_prefix)
-            # Restore registry DB from MinIO if local doesn't exist yet
-            db_path = Path(config.db_path)
-            if not db_path.exists() and config.registry_backend == "sqlite":
-                try:
-                    db_object = f"registry/{config.node_id}.db"
-                    self._minio.restore_db(db_path, db_object)
-                except Exception as exc:
-                    logger.info("No MinIO registry backup found for node %s: %s", config.node_id, exc)
         self._resync_snapshot_cache: dict[str, Any] | None = None
         self.op_log: OperationLog | None = None
         if config.enable_cluster:
@@ -299,6 +340,15 @@ class ClusterRuntime:
         if self.config.enable_cluster and self.op_log is not None:
             self._oplog_sync_task = asyncio.create_task(self._oplog_sync_loop())
             logger.info("Op-log sync loop started for node=%s", self.config.node_id)
+
+        # Start periodic MinIO sync if enabled
+        if self._minio is not None:
+            self._minio_sync_task = asyncio.create_task(self._minio_sync_loop())
+            logger.info(
+                "MinIO periodic sync started interval=%.1fs node=%s",
+                self.config.minio_sync_interval_s,
+                self.config.node_id,
+            )
 
     async def _bootstrap_seeds(self) -> None:
         """Attempt initial transport connects to configured seed hosts."""
@@ -1021,6 +1071,12 @@ class ClusterRuntime:
     async def stop(self) -> None:
         """Stop all background tasks and clean up resources."""
         self._audit_event("LEAVE", {"node_id": self.config.node_id})
+        if self._minio_sync_task is not None and not self._minio_sync_task.done():
+            self._minio_sync_task.cancel()
+            try:
+                await self._minio_sync_task
+            except asyncio.CancelledError:
+                pass
         if self._oplog_sync_task is not None and not self._oplog_sync_task.done():
             self._oplog_sync_task.cancel()
             try:
@@ -1036,27 +1092,121 @@ class ClusterRuntime:
         await self.coordinator.stop_wal_replay()
         if self.op_log is not None:
             self.op_log.close()
-        # Sync registry and op-log databases to MinIO on clean shutdown
+        # Sync registry, op-log, and snapshots to MinIO on clean shutdown
         if self._minio is not None:
-            await self._sync_databases_to_minio()
+            await self._sync_all_to_minio()
 
-    async def _sync_databases_to_minio(self) -> None:
-        """Upload local registry and op-log databases to MinIO object storage."""
+    async def _sync_all_to_minio(self) -> None:
+        """Upload registry DB, op-log DB, write-node snapshot, and read-node cache to MinIO."""
         if self._minio is None:
             return
+        node_id = self.config.node_id
         try:
-            node_id = self.config.node_id
             # Sync registry DB
-            registry_object = f"registry/{node_id}.db"
-            self._minio.sync_db(self.config.db_path, registry_object)
-            logger.info("Synced registry DB to MinIO: %s", registry_object)
-            # Sync op-log DB (same db_path for SQLite-backed op-log)
-            if self.op_log is not None:
-                oplog_object = f"oplog/{node_id}.db"
-                self._minio.sync_db(self.config.db_path, oplog_object)
-                logger.info("Synced op-log DB to MinIO: %s", oplog_object)
+            self._minio.sync_db(self.config.db_path, f"registry/{node_id}.db")
+            logger.info("Synced registry DB to MinIO: registry/%s.db", node_id)
         except Exception as exc:
-            logger.warning("Failed to sync databases to MinIO: %s", exc)
+            logger.warning("Failed to sync registry DB to MinIO: %s", exc)
+        try:
+            # Sync op-log DB if active
+            if self.op_log is not None:
+                self._minio.sync_db(self.config.db_path, f"oplog/{node_id}.db")
+                logger.info("Synced op-log DB to MinIO: oplog/%s.db", node_id)
+        except Exception as exc:
+            logger.warning("Failed to sync op-log DB to MinIO: %s", exc)
+        try:
+            # Sync write-node snapshot
+            self._sync_write_node_snapshot()
+        except Exception as exc:
+            logger.warning("Failed to sync write-node snapshot to MinIO: %s", exc)
+        try:
+            # Sync read-node cache (persist current cache as "latest" parquet)
+            import time as _time
+            ts = _time.strftime("%Y%m%dT%H%M%S", _time.gmtime())
+            self.coordinator.read_node.persist(f"snapshot_{node_id}_{ts}")
+            logger.debug("Synced read-node parquet snapshot: snapshot_%s_%s", node_id, ts)
+        except Exception as exc:
+            logger.warning("Failed to sync read-node snapshot to MinIO: %s", exc)
+
+    def _sync_write_node_snapshot(self) -> None:
+        """Persist the current write-node state to MinIO as a parquet snapshot."""
+        if self._minio is None:
+            return
+        import time as _time
+        import tempfile as _tempfile
+
+        node_id = self.config.node_id
+        ts = _time.strftime("%Y%m%dT%H%M%S", _time.gmtime())
+        with _tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            self.coordinator.write_node.to_parquet(tmp_path)
+            object_name = f"snapshots/{node_id}/write_node_{ts}.parquet"
+            self._minio.upload_file(tmp_path, object_name)
+            logger.info("Synced write-node snapshot to MinIO: %s", object_name)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def _restore_write_node_from_minio(self) -> None:
+        """Download the latest write-node snapshot from MinIO and seed the write node.
+
+        Only restores if the write node is empty (new node / cold start).
+        """
+        if self._minio is None:
+            return
+
+        wn = self.coordinator.write_node
+        snapshot_df = wn.snapshot()
+        if not snapshot_df.empty:
+            logger.debug("WriteNode already has data, skipping MinIO snapshot restore")
+            return
+
+        node_id = self.config.node_id
+        prefix = f"snapshots/{node_id}/"
+        try:
+            objects = self._minio.list_objects(prefix)
+        except Exception as exc:
+            logger.info("Could not list write-node snapshots: %s", exc)
+            return
+
+        # Find the latest snapshot by name (timestamp suffix)
+        parquet_objects = [o for o in objects if o.endswith(".parquet")]
+        if not parquet_objects:
+            logger.info("No write-node snapshots found in MinIO for node %s", node_id)
+            return
+
+        parquet_objects.sort(reverse=True)
+        latest = parquet_objects[0]
+        # Strip global prefix to get the relative key
+        relative = latest
+        if relative.startswith(self._minio._prefix):
+            relative = relative[len(self._minio._prefix):]
+
+        import tempfile as _tempfile
+        with _tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            self._minio.download_file(relative, tmp_path)
+            wn.from_parquet(tmp_path)
+            logger.info("Restored write-node from MinIO snapshot: %s", relative)
+        except Exception as exc:
+            logger.warning("Failed to restore write-node from MinIO: %s", exc)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    async def _minio_sync_loop(self) -> None:
+        """Periodically sync databases and snapshots to MinIO."""
+        if self._minio is None:
+            return
+        interval_s = max(1.0, float(self.config.minio_sync_interval_s))
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+                await self._sync_all_to_minio()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("MinIO periodic sync error: %s", exc)
 
     def route_write(self, row_index: int):
         """Return the NodeInfo that owns the given row index based on current partition map.

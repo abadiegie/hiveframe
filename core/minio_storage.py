@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -182,6 +183,33 @@ class MinioDataDir:
                 object_name=obj,
             )
         logger.debug("MinioDataDir deleted %s/%s", self._bucket, obj)
+
+    # -------------------------------------------------------------------------
+    # JSON helpers
+    # -------------------------------------------------------------------------
+
+    def upload_json(self, data: dict[str, Any], object_name: str) -> str:
+        """Serialize a dict as JSON and upload to MinIO. Returns the object name."""
+        payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return self.upload_bytes(payload, object_name)
+
+    def download_json(self, object_name: str) -> dict[str, Any] | None:
+        """Download and parse a JSON object from MinIO. Returns None if not found."""
+        try:
+            payload = self.download_bytes(object_name)
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            logger.debug("MinioDataDir download_json not found or invalid: %s", self._object_name(object_name))
+            return None
+
+    def object_exists(self, object_name: str) -> bool:
+        """Check whether an object exists in the bucket."""
+        obj = self._object_name(object_name)
+        try:
+            self._client.stat_object(bucket_name=self._bucket, object_name=obj)
+            return True
+        except Exception:
+            return False
 
     # -------------------------------------------------------------------------
     # SQLite DB sync helpers

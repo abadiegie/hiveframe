@@ -13,23 +13,37 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Lock
 import threading
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import time
 import sqlite3
+import logging
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .minio_storage import MinioDataDir
+
+logger = logging.getLogger("core.read_node")
 
 
 class ReadNode:
     """Thread-safe analytical read store using pandas and parquet persistence."""
 
-    def __init__(self, sync_delay_ms: int = 50, storage_dir: str = ".dframe_store") -> None:
+    def __init__(
+        self,
+        sync_delay_ms: int = 50,
+        storage_dir: str = ".dframe_store",
+        minio_data_dir: MinioDataDir | None = None,
+        node_id: str = "local",
+    ) -> None:
         self._lock = Lock()
         self.sync_delay_ms = sync_delay_ms
         self._version = 0
         self._storage_dir = Path(storage_dir)
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._cache = pd.DataFrame()
+        self._minio: MinioDataDir | None = minio_data_dir
+        self._node_id = node_id
         # Buffering for incoming deltas to apply in batches
         self._delta_buffer: list[dict[str, Any]] = []
         self._buffer_lock = threading.Lock()
@@ -37,6 +51,8 @@ class ReadNode:
         # Tuning parameters: flush when buffer reaches batch_size or after flush_interval_ms
         self._buffer_batch_size = 500  # default flush threshold
         self._buffer_flush_interval_ms = 50  # flush interval in milliseconds
+        if self._minio is not None:
+            logger.info("ReadNode MinIO enabled: node_id=%s", node_id)
 
     @staticmethod
     def _to_pandas_safe(frame: pd.DataFrame) -> pd.DataFrame:
@@ -111,20 +127,86 @@ class ReadNode:
             return self._cache.copy(deep=True)
 
     def persist(self, name: str) -> Path:
-        """Persist cache to parquet and return path."""
+        """Persist cache to parquet (local) and optionally upload to MinIO.
+
+        The MinIO upload happens *outside* the lock to avoid blocking reads
+        during a network round-trip.
+        """
         path = self._storage_dir / f"{name}.parquet"
         with self._lock:
-            # pandas will choose an available engine (pyarrow/fastparquet) if installed
             self._cache.to_parquet(path)
+        # Upload to MinIO (source of truth) outside the lock
+        if self._minio is not None:
+            try:
+                object_name = f"parquet/{self._node_id}/{name}.parquet"
+                self._minio.upload_file(path, object_name)
+                logger.debug("ReadNode.persist: uploaded %s to MinIO %s", name, object_name)
+            except Exception as exc:
+                logger.warning("ReadNode.persist: MinIO upload failed for %s: %s", name, exc)
         return path
 
-    def load(self, name: str) -> pd.DataFrame:
-        """Load parquet dataset into cache and return it."""
+    def load(self, name: str, force_remote: bool = False) -> pd.DataFrame:
+        """Load parquet dataset into cache and return it.
+
+        If the local parquet file is missing and MinIO is configured, the file
+        is downloaded from MinIO first. Set *force_remote* to True to always
+        pull from MinIO (overwriting any local copy).
+        """
         path = self._storage_dir / f"{name}.parquet"
+
+        if self._minio is not None:
+            object_name = f"parquet/{self._node_id}/{name}.parquet"
+            if force_remote or not path.exists():
+                try:
+                    self._minio.download_file(object_name, path)
+                    logger.info("ReadNode.load: downloaded %s from MinIO", object_name)
+                except Exception as exc:
+                    if not path.exists():
+                        raise FileNotFoundError(
+                            f"Parquet file not found locally or in MinIO: {name}"
+                        ) from exc
+                    logger.debug("ReadNode.load: MinIO download failed, using local copy: %s", exc)
+
         frame = pd.read_parquet(path)
         with self._lock:
             self._cache = frame
         return frame
+
+    def restore_all_from_minio(self) -> int:
+        """Download all parquet objects for this node from MinIO into local storage.
+
+        Returns the number of files restored.
+        """
+        if self._minio is None:
+            return 0
+
+        prefix = f"parquet/{self._node_id}/"
+        try:
+            objects = self._minio.list_objects(prefix)
+        except Exception as exc:
+            logger.warning("ReadNode.restore_all_from_minio: list failed: %s", exc)
+            return 0
+
+        count = 0
+        for obj_name in objects:
+            # Extract just the filename portion after the prefix
+            relative = obj_name
+            if relative.startswith(self._minio._prefix):
+                relative = relative[len(self._minio._prefix):]
+            if relative.startswith(prefix):
+                relative = relative[len(prefix):]
+            if not relative.endswith(".parquet"):
+                continue
+            local_path = self._storage_dir / relative
+            try:
+                self._minio.download_file(f"{prefix}{relative}", local_path)
+                count += 1
+                logger.info("ReadNode.restore_all: restored %s", relative)
+            except Exception as exc:
+                logger.warning("ReadNode.restore_all: failed to download %s: %s", relative, exc)
+
+        logger.info("ReadNode.restore_all_from_minio: restored %d parquet files", count)
+        return count
 
     @property
     def version(self) -> int:

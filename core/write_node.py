@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 import logging
@@ -96,6 +97,33 @@ class WriteNode:
         with self._lock:
             logger.debug("WriteNode.snapshot called returning rows=%d cols=%d", len(self._df.index), len(self._df.columns))
             return self._df.copy(deep=True)
+
+    def to_parquet(self, path: str | Path) -> Path:
+        """Persist current write-node state to a parquet file for MinIO snapshot support.
+
+        Returns the path written to.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._df.to_parquet(target)
+        logger.info("WriteNode.to_parquet path=%s rows=%d cols=%d", target, len(self._df.index), len(self._df.columns))
+        return target
+
+    def from_parquet(self, path: str | Path) -> None:
+        """Restore write-node state from a parquet snapshot.
+
+        Replaces the in-memory DataFrame entirely.
+        """
+        target = Path(path)
+        if not target.exists():
+            logger.info("WriteNode.from_parquet: snapshot not found at %s, skipping", target)
+            return
+        frame = pd.read_parquet(target)
+        with self._lock:
+            self._df = frame
+            self._version += 1
+        logger.info("WriteNode.from_parquet path=%s rows=%d cols=%d version=%d", target, len(frame.index), len(frame.columns), self._version)
 
     def read_fresh_lazy(
         self, columns: list[str] | None = None, chunk_size: int = 1000
