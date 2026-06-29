@@ -308,6 +308,7 @@ class RelationalAgentWriter:
         target_column: str,
         instruction: str,
         chunk_size: int = 10,
+        start_row: int = 0,
         context_columns: list[str] | None = None,
         provider: str = "anthropic",
         model: str | None = None,
@@ -361,7 +362,7 @@ class RelationalAgentWriter:
             if selected_cols:
                 fresh = fresh[selected_cols]
 
-        for i in range(0, total, chunk_size):
+        for i in range(max(0, start_row), total, chunk_size):
             chunk = fresh.iloc[i : i + chunk_size]
             chunk_rows = list(zip(chunk.index.tolist(), chunk.to_dict(orient="records"), strict=False))
 
