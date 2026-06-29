@@ -186,6 +186,15 @@ class RedisWriteAheadLog:
                 ) from exc
             self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
 
+    @property
+    def _next_lsn(self) -> int:
+        """Read current LSN from Redis (used by checkpoint for versioning)."""
+        try:
+            val = self._redis.get(self._lsn_key)
+            return int(val) + 1 if val is not None else 1
+        except Exception:
+            return 1
+
         logger.info("RedisWriteAheadLog initialized prefix=%s", self._prefix)
 
     def _entry_from_tx(self, lsn: int, transaction: Transaction) -> dict[str, Any]:
