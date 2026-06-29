@@ -66,7 +66,24 @@ class WriteNode:
                         )
                         self._df = snapshot
                         return False
-                    self._df.at[row_idx, col] = op.new_value
+                    try:
+                        self._df.at[row_idx, col] = op.new_value
+                    except (TypeError, ValueError) as _dtype_err:
+                        # Mixed type: coerce column to object and retry
+                        import pandas.errors as _pd_errs
+                        if not isinstance(_dtype_err, _pd_errs.LossySetitemError) and str(self._df[col].dtype) == "object":
+                            raise
+                        self._df[col] = self._df[col].astype(object)
+                        self._df.at[row_idx, col] = op.new_value
+                    except Exception:
+                        self._df[col] = self._df[col].astype(object)
+                        self._df.at[row_idx, col] = op.new_value
+                        # Mixed type: coerce column to object and retry
+                        if str(self._df[col].dtype) != "object":
+                            self._df[col] = self._df[col].astype(object)
+                            self._df.at[row_idx, col] = op.new_value
+                        else:
+                            raise
                     delta.append(op.to_dict())
                 self._version += 1
             except Exception as e:
