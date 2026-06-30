@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
@@ -51,9 +52,12 @@ class WriteAheadLog:
         self._entries: list[WALEntry] = []
         self._next_lsn = 1
         self._wal_path = Path(wal_path) if wal_path else None
+        self._wal_file = None  # persistent file handle; opened once after recovery
         logger.info("WriteAheadLog initialized%s", f" (persisted to {self._wal_path})" if self._wal_path else "")
         if self._wal_path:
             self._recover_from_disk()
+            self._wal_path.parent.mkdir(parents=True, exist_ok=True)
+            self._wal_file = open(self._wal_path, "a")  # noqa: SIM115
 
     def append(self, transaction: Transaction) -> int:
         """Append a transaction snapshot and return its LSN. Also persist to disk if enabled."""
@@ -68,9 +72,9 @@ class WriteAheadLog:
                 state=transaction.state.value,
             )
             self._entries.append(entry)
-            if self._wal_path:
-                with open(self._wal_path, "a") as f:
-                    f.write(json.dumps(entry.to_dict()) + "\n")
+            if self._wal_file is not None:
+                self._wal_file.write(json.dumps(entry.to_dict()) + "\n")
+                self._wal_file.flush()
             logger.info("WAL.append lsn=%s tx_id=%s state=%s ops=%d", lsn, transaction.tx_id, transaction.state.value, len(entry.operations))
             return lsn
 
@@ -84,6 +88,13 @@ class WriteAheadLog:
                 self._entries.append(WALEntry(**entry_dict))
         self._next_lsn = len(self._entries) + 1
         logger.info("WAL recovered %d entries from %s", len(self._entries), self._wal_path)
+
+    def close(self) -> None:
+        """Flush and close the persistent WAL file handle, if open."""
+        if self._wal_file is not None:
+            self._wal_file.flush()
+            self._wal_file.close()
+            self._wal_file = None
 
     def compact(self, keep_last_n: int = 1000) -> int:
         """
@@ -109,9 +120,14 @@ class WriteAheadLog:
             return removed
 
     def get_since(self, lsn: int) -> list[dict[str, Any]]:
-        """Return entries with LSN greater than the given value."""
+        """Return entries with LSN greater than the given value.
+
+        Uses bisect on the sorted LSN list — O(log n) seek, O(k) slice.
+        """
         with self._lock:
-            results = [entry.to_dict() for entry in self._entries if entry.lsn > lsn]
+            lsns = [e.lsn for e in self._entries]
+            start = bisect.bisect_right(lsns, lsn)
+            results = [self._entries[i].to_dict() for i in range(start, len(self._entries))]
             logger.debug("WAL.get_since lsn=%s results=%d", lsn, len(results))
             return results
 

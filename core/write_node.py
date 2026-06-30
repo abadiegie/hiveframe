@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from threading import Lock, Thread
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from typing import Any
 import logging
 
@@ -28,6 +29,10 @@ class WriteNode:
     semantics on conflicts or exceptions.
     """
 
+    # Shared pool: one thread is plenty for sequential delta callbacks; max_workers=2
+    # gives headroom for bursts without spawning unbounded threads.
+    _callback_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wn-delta")
+
     def __init__(self, initial_data: dict[str, list[Any]] | None = None, bulk_mode: bool = True) -> None:
         self._lock = Lock()
         self._df = pd.DataFrame(initial_data or {})
@@ -44,7 +49,18 @@ class WriteNode:
         """Apply transaction operations atomically with rollback on failure."""
         logger.debug("WriteNode.apply start tx_id=%s ops=%d bulk_mode=%s", transaction.tx_id, len(transaction.operations), self._bulk_mode)
         with self._lock:
-            snapshot = self._df.copy(deep=True)
+            # Snapshot only the columns touched by this transaction — not the entire shared DataFrame.
+            # Rolling back means restoring just those series, which is orders of magnitude cheaper
+            # when many DFrame columns coexist in _df.
+            touched_cols: set[str] = set()
+            for op in transaction.operations:
+                col, row_idx = self._parse_cell_id(op.cell_id)
+                if row_idx >= 0:
+                    touched_cols.add(col)
+            col_snapshots: dict[str, Any] = {
+                c: self._df[c].copy() for c in touched_cols if c in self._df.columns
+            }
+            orig_len = len(self._df.index)
             try:
                 delta: list[dict[str, Any]] = []
                 for op in transaction.operations:
@@ -64,7 +80,7 @@ class WriteNode:
                             current_value,
                             op.old_value,
                         )
-                        self._df = snapshot
+                        self._rollback(col_snapshots, orig_len)
                         return False
                     try:
                         self._df.at[row_idx, col] = op.new_value
@@ -87,17 +103,14 @@ class WriteNode:
                     delta.append(op.to_dict())
                 self._version += 1
             except Exception as e:
-                self._df = snapshot
+                self._rollback(col_snapshots, orig_len)
                 logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
                 return False
 
         if self._delta_callback is not None:
             logger.debug("WriteNode.apply dispatching delta callback tx_id=%s version=%d ops=%d", transaction.tx_id, self._version, len(delta))
-            Thread(
-                target=self._delta_callback,
-                args=(transaction.tx_id, delta, self._version),
-                daemon=True,
-            ).start()
+            cb, tx_id, ver = self._delta_callback, transaction.tx_id, self._version
+            WriteNode._callback_pool.submit(cb, tx_id, delta, ver)
         logger.info("WriteNode.apply success tx_id=%s version=%d", transaction.tx_id, self._version)
         return True
 
@@ -156,13 +169,23 @@ class WriteNode:
         Yields:
             pandas.DataFrame: chunk of up to chunk_size rows.
         """
+        # Take a shallow reference copy inside the lock, then release immediately.
+        # Holding _lock across yield would block all writes for the entire iteration.
         with self._lock:
             df = self._df if columns is None else self._df[columns]
-            total_rows = len(df)
-            for start in range(0, total_rows, chunk_size):
-                chunk = df.iloc[start : start + chunk_size].copy()
-                logger.debug("WriteNode.read_fresh_lazy chunk start=%d size=%d", start, len(chunk))
-                yield chunk
+            df = df.copy()  # snapshot: shallow copy is enough; columns are immutable strings
+        total_rows = len(df)
+        for start in range(0, total_rows, chunk_size):
+            chunk = df.iloc[start : start + chunk_size].copy()
+            logger.debug("WriteNode.read_fresh_lazy chunk start=%d size=%d", start, len(chunk))
+            yield chunk
+
+    def _rollback(self, col_snapshots: dict[str, Any], orig_len: int) -> None:
+        # Trim any rows added during the failed transaction.
+        if len(self._df.index) > orig_len:
+            self._df = self._df.iloc[:orig_len]
+        for col, series in col_snapshots.items():
+            self._df[col] = series
 
     def _ensure_row(self, row_idx: int) -> None:
         target_len = row_idx + 1

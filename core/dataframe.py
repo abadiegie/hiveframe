@@ -750,12 +750,15 @@ class DFrame:
         from collections import defaultdict
         node_ops: dict[str, list[Operation]] = defaultdict(list)
 
-        for row_idx in range(max(row_count, len(values))):
-            old_value = (
-                snapshot.at[row_idx, column]
-                if column in snapshot.columns and row_idx < len(snapshot.index)
-                else None
-            )
+        # Extract old values as a list once (vectorised) instead of per-row .at[]
+        if column in snapshot.columns:
+            old_col = snapshot[column].tolist()
+        else:
+            old_col = []
+
+        total = max(row_count, len(values))
+        for row_idx in range(total):
+            old_value = old_col[row_idx] if row_idx < len(old_col) else None
             new_value = values[row_idx] if row_idx < len(values) else None
             op = Operation(
                 cell_id=self._cell_id(column, row_idx),
@@ -891,7 +894,11 @@ class DFrame:
         owning writer snapshot.
         For global cluster reads (fan-out across all nodes), use read_fresh_async().
         """
-        return self._get_cached_snapshot().copy(deep=True)
+        # Shallow copy protects the cache from external mutation without paying
+        # the cost of copying every cell value (deep=True).  Column values are
+        # Python objects that are replaced—not mutated—during writes, so shallow
+        # is safe here.
+        return self._get_cached_snapshot().copy(deep=False)
 
     def read_fresh_global(self) -> pd.DataFrame:
         """Return a global merged snapshot from sync code.
@@ -1033,29 +1040,30 @@ class DFrame:
     # Rule: read ops → delegate to global read_fresh(); write ops → transactional
     # -------------------------------------------------------------------------
 
-    # Read-only properties delegated to global snapshot
+    # Read-only properties delegated to the cached snapshot (no extra copy).
+    # _get_cached_snapshot() rebuilds only when write_node._version changes.
     @property
     def shape(self) -> tuple[int, int]:
-        return self.read_fresh().shape
+        return self._get_cached_snapshot().shape
 
     @property
     def columns(self) -> pd.Index:
-        return self.read_fresh().columns
+        return self._get_cached_snapshot().columns
 
     @property
     def dtypes(self) -> pd.Series:
-        return self.read_fresh().dtypes
+        return self._get_cached_snapshot().dtypes
 
     @property
     def index(self) -> pd.Index:
-        return self.read_fresh().index
+        return self._get_cached_snapshot().index
 
     @property
     def values(self) -> Any:
-        return self.read_fresh().values
+        return self._get_cached_snapshot().values
 
     def __len__(self) -> int:
-        return len(self.read_fresh())
+        return len(self._get_cached_snapshot())
 
     def __repr__(self) -> str:
         return f"DFrame(\n{self.read_fresh().__repr__()}\n)"
@@ -1166,9 +1174,13 @@ class DFrame:
             self._checkpoints = {}
         checkpoint_id = label or f"cp_{int(time.time())}"
         current_lsn = self._coordinator.wal._next_lsn - 1
+        # Store a DataFrame reference instead of a dict-of-lists.
+        # _get_cached_snapshot() returns the cached frame (already a copy from
+        # _build_local_snapshot); no further copy is needed here because future
+        # writes replace the cache object rather than mutating it.
         self._checkpoints[checkpoint_id] = {
             "lsn": current_lsn,
-            "snapshot": self.read_fresh().to_dict(orient="list"),
+            "snapshot_df": self._get_cached_snapshot(),
             "created_at": time.time(),
         }
         return checkpoint_id
@@ -1182,7 +1194,7 @@ class DFrame:
             raise RuntimeError("rollback() is unavailable when transactional=False")
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
-        snapshot = self._checkpoints[checkpoint_id]["snapshot"]
+        snapshot_df: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
 
         # Clear all existing columns for this frame namespace before restoring
         prefix = f"{self._frame_id}{self._SEP}"
@@ -1194,13 +1206,13 @@ class DFrame:
             wn._version += 1
 
         self._invalidate_snapshot_cache()
-        self._seed_initial_data(snapshot)
+        self._seed_initial_data(snapshot_df.to_dict(orient="list"))
 
     def list_checkpoints(self) -> list[dict]:
         if not hasattr(self, '_checkpoints'):
             return []
         return [
-            {"id": k, **v}
+            {"id": k, "lsn": v["lsn"], "created_at": v["created_at"]}
             for k, v in self._checkpoints.items()
         ]
 
@@ -1209,7 +1221,7 @@ class DFrame:
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
         import pandas as pd
-        old = pd.DataFrame(self._checkpoints[checkpoint_id]["snapshot"])
+        old: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
         new = self.read_fresh()
         # Find changed cells
         diff = (old != new).stack()
