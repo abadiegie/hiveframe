@@ -708,10 +708,16 @@ class DFrame:
         wn = self._coordinator.write_node
         with wn._lock:
             new_df = pd.DataFrame(namespaced)
-            # Merge with existing data if present
             if wn._df.empty:
                 wn._df = new_df
             else:
+                # Drop any pre-existing columns for this frame before merging.
+                # Without this, repeated seeding (e.g. lazy upgrade after a local
+                # reload) produces duplicate column names, which makes df[col]
+                # return a DataFrame instead of a Series.
+                cols_to_replace = [c for c in wn._df.columns if c in new_df.columns]
+                if cols_to_replace:
+                    wn._df = wn._df.drop(columns=cols_to_replace)
                 wn._df = pd.concat([wn._df, new_df], axis=1)
             wn._version += 1
 
