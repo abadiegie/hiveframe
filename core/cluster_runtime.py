@@ -41,6 +41,7 @@ class RuntimeConfig:
     port: int = 19000
     partition_start: int = 0
     partition_end: int = 1000
+    partition_weight: float = 1.0
     nats_url: str = "nats://127.0.0.1:4222"
     db_path: str = ".hiveframe/registry.db"
     enable_cluster: bool = False
@@ -178,19 +179,6 @@ class ClusterRuntime:
             self.coordinator.set_wal_replay_cursor_path(
                 f".hiveframe/wal_replay_cursor_{config.node_id}.json"
             )
-
-        # --- Bootstrap WriteNode from MinIO snapshot if available ---
-        if self._minio is not None:
-            self._restore_write_node_from_minio()
-
-        # --- Restore ReadNode parquet cache from MinIO ---
-        if self._minio is not None and hasattr(self.coordinator.read_node, "restore_all_from_minio"):
-            try:
-                restored = self.coordinator.read_node.restore_all_from_minio()
-                if restored > 0:
-                    logger.info("Restored %d parquet files from MinIO into ReadNode cache", restored)
-            except Exception as exc:
-                logger.warning("Failed to restore ReadNode parquets from MinIO: %s", exc)
 
         # Registry selection
         if config.registry_backend == "sqlite":
@@ -340,6 +328,7 @@ class ClusterRuntime:
             status="healthy",
             leader_reachable=self.config.is_leader or self.config.leader_node_id is None,
             wal_reachable=True,
+            weight=self.config.partition_weight,
         )
 
         await self.registry.register(node_info)

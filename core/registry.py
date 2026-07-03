@@ -28,6 +28,7 @@ class NodeInfo:
     leader_reachable: bool = True
     wal_reachable: bool = True
     leader_epoch: int = 0
+    weight: float = 1.0
 
     @property
     def capability(self) -> str:
@@ -102,18 +103,30 @@ class ClusterRegistry:
         )
 
     def _rebalance_partitions(self) -> None:
-        """Divide [0, PARTITION_TOTAL) evenly across all healthy writer nodes."""
+        """Divide [0, PARTITION_TOTAL) across healthy writers proportional to node weight."""
         writers = self._write_nodes_sorted()
         if not writers:
             logger.debug("No writers available for rebalance")
             return
-        chunk = _PARTITION_TOTAL // len(writers)
+        total_weight = sum(max(n.weight, 0.0) for n in writers)
+        if total_weight <= 0:
+            total_weight = float(len(writers))
+        cursor = 0
         for idx, node in enumerate(writers):
-            node.partition_start = idx * chunk
-            node.partition_end = (
-                (idx + 1) * chunk if idx < len(writers) - 1 else _PARTITION_TOTAL
-            )
-        logger.info("Rebalanced partitions across %d writers", len(writers))
+            node.partition_start = cursor
+            if idx == len(writers) - 1:
+                node.partition_end = _PARTITION_TOTAL
+            else:
+                remaining_nodes = len(writers) - idx - 1
+                share = max(1, round(node.weight / total_weight * _PARTITION_TOTAL))
+                share = min(share, _PARTITION_TOTAL - cursor - remaining_nodes)
+                node.partition_end = cursor + share
+                cursor = node.partition_end
+        logger.info(
+            "Rebalanced partitions across %d writers (weighted): %s",
+            len(writers),
+            [(n.node_id, n.weight, n.partition_start, n.partition_end) for n in writers],
+        )
 
     def get_owner_for_row(self, row_index: int) -> NodeInfo | None:
         """Return the writer node that owns the partition containing row_index.

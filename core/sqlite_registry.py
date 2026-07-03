@@ -29,6 +29,7 @@ class NodeInfo:
     leader_reachable: bool = True
     wal_reachable: bool = True
     leader_epoch: int = 0
+    weight: float = 1.0
 
     @property
     def capability(self) -> str:
@@ -140,6 +141,10 @@ class SQLiteRegistry:
             logger.info("Migrating schema: adding leader_epoch column")
             conn.execute("ALTER TABLE nodes ADD COLUMN leader_epoch INTEGER DEFAULT 0")
 
+        if "weight" not in existing_columns:
+            logger.info("Migrating schema: adding weight column")
+            conn.execute("ALTER TABLE nodes ADD COLUMN weight REAL DEFAULT 1.0")
+
     @staticmethod
     def _row_to_node(row: sqlite3.Row | tuple | None) -> NodeInfo | None:
         if row is None:
@@ -148,16 +153,17 @@ class SQLiteRegistry:
         # Old: (node_id, host, port, role, region, partition_start, partition_end, last_seen, lsn, status)
         # New: (..., status, leader_reachable, wal_reachable, leader_epoch)
         row_tuple = tuple(row)
-        if len(row_tuple) == 10:
-            # Old schema — add default values
-            return NodeInfo(*row_tuple, leader_reachable=True, wal_reachable=True, leader_epoch=0)
-        elif len(row_tuple) >= 12:
-            if len(row_tuple) >= 13:
-                return NodeInfo(*row_tuple[:13])
-            return NodeInfo(*row_tuple[:12], leader_epoch=0)
+        n = len(row_tuple)
+        if n == 10:
+            return NodeInfo(*row_tuple, leader_reachable=True, wal_reachable=True, leader_epoch=0, weight=1.0)
+        elif n == 11:
+            return NodeInfo(*row_tuple[:10], leader_reachable=bool(row_tuple[10]), wal_reachable=True, leader_epoch=0, weight=1.0)
+        elif n == 12:
+            return NodeInfo(*row_tuple[:12], leader_epoch=0, weight=1.0)
+        elif n == 13:
+            return NodeInfo(*row_tuple[:13], weight=1.0)
         else:
-            # Unexpected — fall back to tuple unpacking
-            return NodeInfo(*row_tuple)
+            return NodeInfo(*row_tuple[:14])
 
     def _fetchall_nodes(self, query: str, params: tuple = ()) -> list[NodeInfo]:
         conn = self._require_connection()
@@ -196,19 +202,19 @@ class SQLiteRegistry:
         with self._lock:
             conn.execute(
                 """
-                INSERT INTO nodes (node_id, host, port, role, region, partition_start, partition_end, last_seen, lsn, status, leader_reachable, wal_reachable, leader_epoch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO nodes (node_id, host, port, role, region, partition_start, partition_end, last_seen, lsn, status, leader_reachable, wal_reachable, leader_epoch, weight)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
                     host=excluded.host, port=excluded.port, role=excluded.role, region=excluded.region,
                     partition_start=excluded.partition_start, partition_end=excluded.partition_end,
                     last_seen=excluded.last_seen, lsn=excluded.lsn, status=excluded.status,
                     leader_reachable=excluded.leader_reachable, wal_reachable=excluded.wal_reachable,
-                    leader_epoch=excluded.leader_epoch
+                    leader_epoch=excluded.leader_epoch, weight=excluded.weight
                 """,
                 (
                     node.node_id, node.host, node.port, node.role, node.region,
                     node.partition_start, node.partition_end, node.last_seen, node.lsn, node.status,
-                    node.leader_reachable, node.wal_reachable, node.leader_epoch,
+                    node.leader_reachable, node.wal_reachable, node.leader_epoch, node.weight,
                 ),
             )
             conn.commit()
@@ -228,17 +234,34 @@ class SQLiteRegistry:
         if not writers:
             logger.debug("No writers available for rebalance")
             return
-        chunk = _PARTITION_TOTAL // len(writers)
+        total_weight = sum(max(n.weight, 0.0) for n in writers)
+        if total_weight <= 0:
+            total_weight = float(len(writers))
+        cursor = 0
+        bounds: list[tuple[int, int, str]] = []
+        for idx, node in enumerate(writers):
+            start = cursor
+            if idx == len(writers) - 1:
+                end = _PARTITION_TOTAL
+            else:
+                remaining_nodes = len(writers) - idx - 1
+                share = max(1, round(node.weight / total_weight * _PARTITION_TOTAL))
+                share = min(share, _PARTITION_TOTAL - cursor - remaining_nodes)
+                end = cursor + share
+                cursor = end
+            bounds.append((start, end, node.node_id))
         with self._lock:
-            for idx, node in enumerate(writers):
-                start = idx * chunk
-                end = (idx + 1) * chunk if idx < len(writers) - 1 else _PARTITION_TOTAL
+            for start, end, node_id in bounds:
                 conn.execute(
                     "UPDATE nodes SET partition_start=?, partition_end=? WHERE node_id=?",
-                    (start, end, node.node_id),
+                    (start, end, node_id),
                 )
             conn.commit()
-        logger.info("Rebalanced partitions across %d SQLite writers", len(writers))
+        logger.info(
+            "Rebalanced partitions across %d SQLite writers (weighted): %s",
+            len(writers),
+            [(nid, s, e) for s, e, nid in bounds],
+        )
 
     def get_owner_for_row(self, row_index: int) -> NodeInfo | None:
         writers = self._write_nodes_sorted()
@@ -324,6 +347,7 @@ class SQLiteRegistry:
             last_seen=time.time(),
             lsn=node.lsn,
             status="failed",
+            weight=node.weight,
         )
         await self._notify(failed_node, "failed")
 
