@@ -40,7 +40,8 @@ class NodeInfo:
 
 WatchCallback = Callable[[NodeInfo, str], Awaitable[None]]
 logger = logging.getLogger("core.sqlite_registry")
-_PARTITION_TOTAL = 1000
+_PARTITION_TOTAL = 10000
+_MIN_SLOT_WARNING = 10
 
 class SQLiteRegistry:
     def __init__(self, db_path: str = ".hiveframe/registry.db"):
@@ -262,6 +263,17 @@ class SQLiteRegistry:
             len(writers),
             [(nid, s, e) for s, e, nid in bounds],
         )
+        total_weight = sum(max(n.weight, 0.0) for n in writers)
+        for start, end, node_id in bounds:
+            slots = end - start
+            if slots < _MIN_SLOT_WARNING:
+                node_weight = next((n.weight for n in writers if n.node_id == node_id), 1.0)
+                logger.warning(
+                    "Node %s has only %d partition slot(s) (weight=%.2f of total=%.2f). "
+                    "Large datasets will give this node a disproportionate row load. "
+                    "Increase node weight or reduce the number of writer nodes.",
+                    node_id, slots, node_weight, total_weight,
+                )
 
     def get_owner_for_row(self, row_index: int) -> NodeInfo | None:
         writers = self._write_nodes_sorted()

@@ -40,7 +40,8 @@ class NodeInfo:
 
 WatchCallback = Callable[[NodeInfo, str], Awaitable[None]]
 
-_PARTITION_TOTAL = 1000
+_PARTITION_TOTAL = 10000
+_MIN_SLOT_WARNING = 10
 
 
 logger = logging.getLogger("core.registry")
@@ -127,6 +128,15 @@ class ClusterRegistry:
             len(writers),
             [(n.node_id, n.weight, n.partition_start, n.partition_end) for n in writers],
         )
+        for node in writers:
+            slots = node.partition_end - node.partition_start
+            if slots < _MIN_SLOT_WARNING:
+                logger.warning(
+                    "Node %s has only %d partition slot(s) (weight=%.2f of total=%.2f). "
+                    "Large datasets will give this node a disproportionate row load. "
+                    "Increase node weight or reduce the number of writer nodes.",
+                    node.node_id, slots, node.weight, total_weight,
+                )
 
     def get_owner_for_row(self, row_index: int) -> NodeInfo | None:
         """Return the writer node that owns the partition containing row_index.

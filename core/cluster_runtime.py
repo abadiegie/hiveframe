@@ -41,7 +41,7 @@ class RuntimeConfig:
     port: int = 19000
     partition_start: int = 0
     partition_end: int = 1000
-    partition_weight: float = 1.0
+    partition_weight: float | None = None
     nats_url: str = "nats://127.0.0.1:4222"
     db_path: str = ".hiveframe/registry.db"
     enable_cluster: bool = False
@@ -84,6 +84,27 @@ class RuntimeConfig:
     audit_log_path: str | None = None
     audit_log_max_bytes: int = 10_485_760
     audit_log_backup_count: int = 3
+
+
+def _resolve_partition_weight(configured: float | None) -> float:
+    """Return partition weight for this node.
+
+    If configured explicitly, use that value (clamped to >= 0.01).
+    Otherwise auto-detect from available RAM via psutil so nodes with
+    more memory naturally receive a larger partition share.
+    Falls back to 1.0 when psutil is not installed.
+    """
+    if configured is not None:
+        return max(0.01, float(configured))
+    try:
+        import psutil
+        available_gb = psutil.virtual_memory().available / (1024 ** 3)
+        weight = max(0.01, round(available_gb, 2))
+        logger.info("partition_weight auto-detected from available RAM: %.2f GB", weight)
+        return weight
+    except Exception as exc:
+        logger.debug("psutil unavailable for partition weight auto-detect (%s); using 1.0", exc)
+        return 1.0
 
 
 class ClusterRuntime:
@@ -328,7 +349,7 @@ class ClusterRuntime:
             status="healthy",
             leader_reachable=self.config.is_leader or self.config.leader_node_id is None,
             wal_reachable=True,
-            weight=self.config.partition_weight,
+            weight=_resolve_partition_weight(self.config.partition_weight),
         )
 
         await self.registry.register(node_info)
