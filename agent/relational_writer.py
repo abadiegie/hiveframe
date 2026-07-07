@@ -309,6 +309,7 @@ class RelationalAgentWriter:
         instruction: str,
         chunk_size: int = 10,
         start_row: int = 0,
+        row_indices: set[int] | None = None,
         context_columns: list[str] | None = None,
         provider: str = "anthropic",
         model: str | None = None,
@@ -366,6 +367,15 @@ class RelationalAgentWriter:
             chunk = fresh.iloc[i : i + chunk_size]
             chunk_rows = list(zip(chunk.index.tolist(), chunk.to_dict(orient="records"), strict=False))
 
+            # Row-subset restriction (positional indices): skip whole chunks that
+            # contain no selected row so we don't spend an LLM call on them.
+            if row_indices is not None and not any(
+                r in row_indices for r in range(i, i + len(chunk))
+            ):
+                if on_progress:
+                    on_progress(min(i + len(chunk), total), total)
+                continue
+
             enriched_context = self._build_enriched_context(chunk_rows)
             messages = self._build_messages(
                 enriched_context=enriched_context,
@@ -403,6 +413,9 @@ class RelationalAgentWriter:
                             "Skipping out-of-bound operation cell_id='%s' row=%d not in [%d, %d]",
                             cell_id, row_idx, chunk_start, chunk_end,
                         )
+                        continue
+                    # Only write selected rows when a subset was requested.
+                    if row_indices is not None and row_idx not in row_indices:
                         continue
                     valid_operations.append(op)
                 operations = valid_operations
