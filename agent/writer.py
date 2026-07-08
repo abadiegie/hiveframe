@@ -384,6 +384,7 @@ class AgentWriter:
         progress_callback: Optional[Callable[[int, int], None]] = None,
         custom_instruction: str | None = None,
         context_columns: list[str] | None = None,
+        row_indices: set[int] | None = None,
     ) -> dict:
         """
         Normalize one column in streaming mode using chunked LLM calls.
@@ -471,6 +472,19 @@ class AgentWriter:
 
         for chunk_idx, start in enumerate(range(0, total, chunk_size)):
             end = min(start + chunk_size, total)
+
+            # Row-subset restriction (positional indices): skip whole chunks that
+            # contain no selected row before building the snapshot / calling the
+            # LLM / logging. Partial chunks still go through — the caller filters
+            # per-row. Without this, filtered/selected/parallel-batch runs scan the
+            # entire frame per job and log NO_OPS for every out-of-scope chunk.
+            if row_indices is not None and not any(
+                r in row_indices for r in range(start, end)
+            ):
+                if progress_callback:
+                    progress_callback(end, total)
+                continue
+
             # After reset_index(drop=True) above, df index is 0..total-1.
             # iloc[start:end] preserves absolute indices (start..end-1),
             # so to_string() shows the correct row numbers for cell_id generation.
