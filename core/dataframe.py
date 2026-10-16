@@ -1016,37 +1016,103 @@ class DFrame:
         for start in range(0, total_rows, chunk_size):
             yield df.iloc[start:start + chunk_size].copy()
 
-    def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000):
-        """Yield DataFrame chunks lazily from the local write-node snapshot.
-
-        If a persisted parquet exists, stream from disk (truly lazy). Otherwise,
-        fallback to in-memory chunking from the writer snapshot.
-        """
-        parquet_path = None
-        if self._coordinator and hasattr(self._coordinator, 'read_node'):
-            storage_dir = getattr(self._coordinator.read_node, '_storage_dir', None)
+    def _parquet_frame(self) -> Path | None:
+        """Path parquet frame ini di read node, kalau ada."""
+        if self._coordinator and hasattr(self, "_coordinator") and hasattr(self._coordinator, "read_node"):
+            storage_dir = getattr(self._coordinator.read_node, "_storage_dir", None)
             if storage_dir is not None:
-                parquet_path = Path(storage_dir) / f"{self._frame_id}.parquet"
-        if parquet_path and parquet_path.exists():
-            # Truly lazy: stream from parquet
+                path = Path(storage_dir) / f"{self._frame_id}.parquet"
+                if path.exists():
+                    return path
+        return None
+
+    def row_count(self) -> int:
+        """Jumlah baris frame tanpa harus mematerialisasi datanya.
+
+        Urutan sumber: catatan baris write node (paling murah), metadata parquet,
+        lalu snapshot memori sebagai jalan terakhir.
+        """
+        wn = getattr(self._coordinator, "write_node", None)
+        if wn is not None:
+            with wn._lock:
+                jumlah = wn._frame_rows.get(self._frame_id)
+            if jumlah is not None:
+                return int(jumlah)
+        path = self._parquet_frame()
+        if path is not None:
             try:
-                import pyarrow
                 import pyarrow.parquet as pq
-                table = pq.read_table(parquet_path, columns=columns)
-                df = table.to_pandas()
-                total_rows = len(df)
-                for start in range(0, total_rows, chunk_size):
-                    yield df.iloc[start : start + chunk_size].copy()
+                return int(pq.ParquetFile(path).metadata.num_rows)
+            except Exception:
+                pass
+        return len(self)
+
+    def iter_record_batches(self, columns: list[str] | None = None, batch_size: int = 1000, start_row: int = 0):
+        """Yield pyarrow RecordBatch bertahap, langsung dari parquet bila ada.
+
+        Bedanya dengan membaca sekaligus: row group yang seluruhnya berada sebelum
+        start_row dilewati, sehingga jendela di tengah frame besar tidak menyeret
+        seluruh frame ke memori.
+        """
+        import pyarrow as pa
+
+        path = self._parquet_frame()
+        if path is not None:
+            try:
+                import pyarrow.parquet as pq
+                berkas = pq.ParquetFile(path)
+                jumlah_grup = berkas.metadata.num_row_groups
+                grup_awal = jumlah_grup
+                dilewati = 0
+                for i in range(jumlah_grup):
+                    baris_grup = berkas.metadata.row_group(i).num_rows
+                    if dilewati + baris_grup <= start_row:
+                        dilewati += baris_grup
+                        continue
+                    grup_awal = i
+                    break
+                if grup_awal >= jumlah_grup:
+                    return
+                sisa_awal = max(0, start_row - dilewati)
+                for batch in berkas.iter_batches(
+                    batch_size=batch_size,
+                    columns=columns,
+                    row_groups=list(range(grup_awal, jumlah_grup)),
+                ):
+                    if sisa_awal:
+                        if batch.num_rows <= sisa_awal:
+                            sisa_awal -= batch.num_rows
+                            continue
+                        batch = batch.slice(sisa_awal)
+                        sisa_awal = 0
+                    if batch.num_rows:
+                        yield batch
                 return
             except Exception:
-                pass  # fallback to in-memory
-        # Fallback: in-memory chunking
+                pass  # fallback ke snapshot memori
         df = self.read_fresh()
         if columns is not None:
             df = df[columns]
-        total_rows = len(df)
-        for start in range(0, total_rows, chunk_size):
-            yield df.iloc[start : start + chunk_size].copy()
+        if start_row:
+            df = df.iloc[start_row:]
+        for start in range(0, len(df), batch_size):
+            yield pa.RecordBatch.from_pandas(df.iloc[start : start + batch_size], preserve_index=False)
+
+    def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000, start_row: int = 0):
+        """Yield DataFrame chunks lazily dengan indeks baris global dipertahankan.
+
+        Kalau parquet ada, batch dibaca bertahap dari disk; kalau tidak, fallback
+        ke snapshot memori. Indeks tiap chunk di-set ke posisi baris global supaya
+        pemanggil lama yang memakai indeks sebagai __row_index__ tetap benar.
+        """
+        offset = max(0, start_row)
+        for batch in self.iter_record_batches(columns=columns, batch_size=chunk_size, start_row=start_row):
+            df = batch.to_pandas()
+            if columns is not None:
+                df = df[[c for c in columns if c in df.columns]]
+            df.index = range(offset, offset + len(df))
+            offset += len(df)
+            yield df
 
     # Backward-compatible alias for local lazy read
     read_lazy = read_fresh_lazy
