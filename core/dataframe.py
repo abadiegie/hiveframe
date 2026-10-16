@@ -852,6 +852,59 @@ class DFrame:
                 return owner.node_id
         return "local"
 
+    def submit_structural(
+        self,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        author_type: str = "human",
+        author_id: str | None = "user",
+    ) -> None:
+        """Kirim satu operasi struktural (perubahan bentuk frame) ke WAL.
+
+        Berbeda dari __setitem__ yang membuat satu operasi per sel, satu operasi
+        struktural mewakili seluruh perubahan: menambah atau menghapus baris dan
+        kolom. Ini yang membuat WAL tetap kecil untuk perubahan bentuk.
+        """
+        isi = dict(payload or {})
+        isi.setdefault("frame_id", self._frame_id)
+        op = Operation(
+            cell_id=f"{self._frame_id}::__structure__",
+            old_value=isi.get("old_value"),
+            new_value=None,
+            author_type=author_type,
+            author_id=author_id,
+            kind=kind,
+            payload=isi,
+        )
+        self._invalidate_snapshot_cache()
+        node_id = "local" if self._runtime is None else self._get_owner_node_id(0)
+        self._submit_routed({node_id: [op]})
+
+    def append_rows(self, count: int, default: Any = None) -> None:
+        """Tambah `count` baris di akhir frame sebagai satu operasi struktural."""
+        self.submit_structural("insert_rows", {"count": int(count), "default": default})
+
+    def delete_rows(self, rows: list[int]) -> None:
+        """Hapus baris berdasarkan indeks posisi sebagai satu operasi struktural."""
+        self.submit_structural("delete_rows", {"rows": [int(r) for r in rows]})
+
+    def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> None:
+        """Tambah kolom pada posisi `at` sebagai satu operasi struktural."""
+        self.submit_structural("insert_column", {"name": name, "values": values, "at": at})
+
+    def drop_column(self, name: str, values: list[Any] | None = None) -> None:
+        """Hapus kolom lewat WAL sebagai satu operasi struktural.
+
+        `values` boleh diisi nilai lama kolom supaya pemulihan (restore) bisa
+        dilakukan tanpa perlu op per sel.
+        """
+        self._schema.pop(name, None)
+        payload: dict[str, Any] = {"name": name}
+        if values is not None:
+            payload["values"] = list(values)
+        self.submit_structural("delete_column", payload)
+
     def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> None:
         """Submit operation groups to the correct coordinator per owning node."""
         # Capability gate: check if this node can accept writes.

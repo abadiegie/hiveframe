@@ -59,16 +59,39 @@ class WriteNode:
             # when many DFrame columns coexist in _df.
             touched_cols: set[str] = set()
             for op in transaction.operations:
+                if getattr(op, "kind", "set_cell") != "set_cell":
+                    # Operasi struktural tidak punya cell_id sel; kolomnya
+                    # disimpan terpisah di frame_snapshots di bawah.
+                    continue
                 col, row_idx = self._parse_cell_id(op.cell_id)
                 if row_idx >= 0:
                     touched_cols.add(col)
             col_snapshots: dict[str, Any] = {
                 c: self._df[c].copy() for c in touched_cols if c in self._df.columns
             }
+            # Snapshot per frame untuk operasi struktural: cukup kolom milik frame
+            # itu, bukan seluruh _df yang dipakai bersama banyak frame.
+            frame_snapshots: dict[str, tuple[dict[str, Any], int | None]] = {}
+            for op in transaction.operations:
+                if getattr(op, "kind", "set_cell") == "set_cell":
+                    continue
+                fid = str((op.payload or {}).get("frame_id") or "")
+                if not fid or fid in frame_snapshots:
+                    continue
+                prefix = f"{fid}::"
+                frame_snapshots[fid] = (
+                    {c: self._df[c].copy() for c in self._df.columns if c.startswith(prefix)},
+                    self._frame_rows.get(fid),
+                )
             orig_len = len(self._df.index)
             try:
                 delta: list[dict[str, Any]] = []
                 for op in transaction.operations:
+                    if getattr(op, "kind", "set_cell") != "set_cell":
+                        # Perubahan bentuk frame: satu operasi, bukan ribuan sel.
+                        self._apply_structural(op)
+                        delta.append(op.to_dict())
+                        continue
                     col, row_idx = self._parse_cell_id(op.cell_id)
                     # Skip bulk operation markers — not real cell writes
                     if row_idx < 0:
@@ -85,7 +108,7 @@ class WriteNode:
                             current_value,
                             op.old_value,
                         )
-                        self._rollback(col_snapshots, orig_len)
+                        self._rollback(col_snapshots, orig_len, frame_snapshots)
                         return False
                     try:
                         self._df.at[row_idx, col] = op.new_value
@@ -110,13 +133,15 @@ class WriteNode:
                 # Beberapa frame berbagi satu _df, jadi tanpa catatan ini frame
                 # pendek terbaca sepanjang frame terpanjang (berisi null).
                 for op in transaction.operations:
+                    if getattr(op, "kind", "set_cell") != "set_cell":
+                        continue  # pencatatan barisnya ditangani _apply_structural
                     col, row_idx = self._parse_cell_id(op.cell_id)
                     if row_idx < 0 or "::" not in col:
                         continue
                     self._catat_baris(col.split("::", 1)[0], row_idx + 1)
                 self._version += 1
             except Exception as e:
-                self._rollback(col_snapshots, orig_len)
+                self._rollback(col_snapshots, orig_len, frame_snapshots)
                 logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
                 return False
 
@@ -193,12 +218,117 @@ class WriteNode:
             logger.debug("WriteNode.read_fresh_lazy chunk start=%d size=%d", start, len(chunk))
             yield chunk
 
-    def _rollback(self, col_snapshots: dict[str, Any], orig_len: int) -> None:
+    def _rollback(
+        self,
+        col_snapshots: dict[str, Any],
+        orig_len: int,
+        frame_snapshots: dict[str, tuple[dict[str, Any], int | None]] | None = None,
+    ) -> None:
         # Trim any rows added during the failed transaction.
         if len(self._df.index) > orig_len:
             self._df = self._df.iloc[:orig_len]
         for col, series in col_snapshots.items():
             self._df[col] = series
+        # Pulihkan kolom per frame untuk operasi struktural: kolom baru dibuang,
+        # kolom yang berubah dikembalikan, dan catatan barisnya direset.
+        for fid, (snapshot, baris_lama) in (frame_snapshots or {}).items():
+            prefix = f"{fid}::"
+            for col in [c for c in self._df.columns if c.startswith(prefix)]:
+                if col not in snapshot:
+                    self._df = self._df.drop(columns=[col])
+            for col, series in snapshot.items():
+                self._df[col] = series.reindex(self._df.index)
+            if baris_lama is None:
+                self._frame_rows.pop(fid, None)
+            else:
+                self._frame_rows[fid] = baris_lama
+
+    def _apply_structural(self, op: Any) -> None:
+        """Terapkan satu operasi struktural pada frame pemiliknya.
+
+        Fase 0 mendukung:
+        - insert_rows: menambah baris DI AKHIR frame (payload: count, default)
+        - delete_rows: menghapus baris berdasarkan indeks (payload: rows)
+        - insert_column: menambah kolom pada posisi tertentu (payload: name, at, values)
+        - delete_column: menghapus kolom (payload: name)
+        """
+        payload = dict(op.payload or {})
+        frame_id = str(payload.get("frame_id") or "")
+        if not frame_id:
+            raise ValueError("operasi struktural butuh payload.frame_id")
+        prefix = f"{frame_id}::"
+        kolom_frame = [c for c in self._df.columns if c.startswith(prefix)]
+        baris_kini = self._frame_rows.get(frame_id)
+        if baris_kini is None:
+            baris_kini = self._extent_frame(frame_id)
+
+        if op.kind == "insert_rows":
+            jumlah = int(payload.get("count", 0))
+            if jumlah <= 0:
+                return
+            posisi = int(payload.get("at", baris_kini))
+            if posisi != baris_kini:
+                raise ValueError("insert_rows Fase 0 hanya mendukung penambahan di akhir")
+            target = baris_kini + jumlah
+            self._ensure_row(target - 1)
+            nilai = payload.get("default")
+            if nilai is not None:
+                for col in kolom_frame:
+                    self._df.loc[baris_kini : target - 1, col] = nilai
+            self._catat_baris(frame_id, target)
+            return
+
+        if op.kind == "delete_rows":
+            baris = sorted({int(i) for i in (payload.get("rows") or []) if 0 <= int(i) < baris_kini})
+            if not baris or not kolom_frame:
+                return
+            for col in kolom_frame:
+                seri = self._df[col].iloc[:baris_kini].drop(index=baris)
+                seri.index = range(len(seri))
+                # Panjang _df tetap; sisa di ekor menjadi kosong dan tidak
+                # terlihat karena catatan baris frame ikut menyusut.
+                self._df[col] = seri.reindex(self._df.index)
+            # Catatan baris frame harus bisa menyusut; _catat_baris hanya menumbuhkan.
+            self._frame_rows[frame_id] = max(0, baris_kini - len(baris))
+            return
+
+        if op.kind == "insert_column":
+            nama = str(payload.get("name") or "")
+            if not nama:
+                raise ValueError("insert_column butuh payload.name")
+            namespaced = f"{prefix}{nama}"
+            if namespaced in self._df.columns:
+                raise ValueError(f"kolom {nama!r} sudah ada di frame {frame_id[:12]}")
+            nilai = payload.get("values")
+            if nilai is None:
+                seri = pd.Series([None] * baris_kini, index=range(baris_kini), dtype=object)
+            else:
+                daftar = list(nilai)[:baris_kini]
+                seri = pd.Series(daftar, index=range(len(daftar)))
+            seri = seri.reindex(self._df.index)
+            self._df[namespaced] = seri
+            # Susun ulang urutan kolom agar posisi `at` dihormati.
+            at = payload.get("at")
+            if at is not None:
+                posisi = max(0, min(int(at), len(kolom_frame)))
+                urutan = list(self._df.columns)
+                urutan.remove(namespaced)
+                if posisi < len(kolom_frame):
+                    urutan.insert(urutan.index(kolom_frame[posisi]), namespaced)
+                else:
+                    indeks_akhir = urutan.index(kolom_frame[-1]) + 1 if kolom_frame else len(urutan)
+                    urutan.insert(indeks_akhir, namespaced)
+                self._df = self._df[urutan]
+            return
+
+        if op.kind == "delete_column":
+            nama = str(payload.get("name") or "")
+            namespaced = f"{prefix}{nama}"
+            if namespaced in self._df.columns:
+                self._df = self._df.drop(columns=[namespaced])
+            return
+
+        raise ValueError(f"jenis operasi struktural tidak dikenal: {op.kind}")
 
     def _ensure_row(self, row_idx: int) -> None:
         target_len = row_idx + 1
