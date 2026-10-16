@@ -26,6 +26,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("hiveframe.dataframe")
 
 
+def _kolom_object_ke_teks(df: pd.DataFrame) -> pd.DataFrame:
+    """Ubah kolom object menjadi teks nullable agar bisa dikonversi ke Arrow.
+
+    Jalur cadangan saat kolom berisi campuran angka dan teks, misalnya sel kosong
+    yang tersimpan sebagai string kosong pada kolom numerik. Pemakaian tipe
+    "string" (bukan str) menjaga nilai kosong tetap NA, bukan teks "nan".
+    """
+    hasil = df.copy()
+    for kolom in hasil.columns:
+        if hasil[kolom].dtype == object:
+            hasil[kolom] = hasil[kolom].astype("string")
+    return hasil
+
+
 def _schema_sidecar_path(parquet_path: Path) -> Path:
     return parquet_path.with_suffix(parquet_path.suffix + ".schema.json")
 
@@ -766,6 +780,31 @@ class DFrame:
             self._coordinator.wal.append(summary_tx)
         self._invalidate_snapshot_cache()
 
+    def __delitem__(self, column: str) -> None:
+        """Hapus satu kolom dari frame ini.
+
+        Kolom namespaced dibuang dari write node dan skemanya (kalau ada)
+        dibersihkan. Operasi per sel tetap dicatat pemanggil lewat WAL, jadi di
+        sini sengaja tidak menambah entri WAL struktural supaya tidak ganda.
+        """
+        if not isinstance(column, str):
+            raise TypeError("column name must be a string")
+        prefix = f"{self._frame_id}::{column}"
+        wn = self._coordinator.write_node
+        with wn._lock:
+            namespaced = prefix if prefix in wn._df.columns else None
+            if namespaced is None:
+                # Kolom hasil impor bisa punya akhiran internal; terima pencocokan
+                # berawalan sama selama tidak ambigu.
+                kandidat = [c for c in wn._df.columns if c.startswith(prefix)]
+                if len(kandidat) != 1:
+                    raise KeyError(column)
+                namespaced = kandidat[0]
+            wn._df = wn._df.drop(columns=[namespaced])
+            wn._version += 1
+        self._schema.pop(column, None)
+        self._invalidate_snapshot_cache()
+
     def __setitem__(self, column: str, value: Any) -> None:
         """Set a full column value, routing each row to its owning node."""
         snapshot = self.read_fresh()
@@ -1099,7 +1138,14 @@ class DFrame:
         if start_row:
             df = df.iloc[start_row:]
         for start in range(0, len(df), batch_size):
-            yield pa.RecordBatch.from_pandas(df.iloc[start : start + batch_size], preserve_index=False)
+            potongan = df.iloc[start : start + batch_size]
+            try:
+                yield pa.RecordBatch.from_pandas(potongan, preserve_index=False)
+            except pa.ArrowInvalid:
+                # Kolom object bercampur (mis. angka dan teks kosong dari data
+                # lama) tidak bisa dikonversi langsung. Kolom seperti itu diubah
+                # ke teks supaya pembacaan tetap jalan daripada gagal total.
+                yield pa.RecordBatch.from_pandas(_kolom_object_ke_teks(potongan), preserve_index=False)
 
     def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000, start_row: int = 0):
         """Yield DataFrame chunks lazily dengan indeks baris global dipertahankan.
