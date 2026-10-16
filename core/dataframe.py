@@ -715,7 +715,10 @@ class DFrame:
         WAL only records a single summary entry for the entire seed.
         """
         max_len = max((len(v) for v in normalized_data.values()), default=0)
-        if max_len == 0:
+        # Dict kosong berarti tidak ada skema sama sekali. Tapi dict berisi kolom
+        # dengan daftar kosong tetap harus membuat kolomnya, supaya frame tanpa
+        # baris pun punya skema dan bisa diisi kemudian.
+        if max_len == 0 and not normalized_data:
             return
         self._catat_baris_frame(max_len)
 
