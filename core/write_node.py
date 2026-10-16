@@ -37,6 +37,11 @@ class WriteNode:
         self._lock = Lock()
         self._df = pd.DataFrame(initial_data or {})
         self._version = 0
+        # Jumlah baris MILIK tiap frame. WriteNode menyimpan satu DataFrame global
+        # berisi kolom semua frame, sehingga tanpa catatan ini jumlah baris sebuah
+        # frame ikut jumlah baris frame terpanjang (frame baru jadi penuh baris
+        # kosong, dan parquet-nya ikut membengkak).
+        self._frame_rows: dict[str, int] = {}
         self._delta_callback: DeltaCallback | None = None
         self._bulk_mode = bulk_mode
         logger.info("WriteNode initialized columns=%s rows=%d bulk_mode=%s", list(self._df.columns), len(self._df.index), bulk_mode)
@@ -101,6 +106,14 @@ class WriteNode:
                         else:
                             raise
                     delta.append(op.to_dict())
+                # Catat jumlah baris milik tiap frame yang tersentuh transaksi ini.
+                # Beberapa frame berbagi satu _df, jadi tanpa catatan ini frame
+                # pendek terbaca sepanjang frame terpanjang (berisi null).
+                for op in transaction.operations:
+                    col, row_idx = self._parse_cell_id(op.cell_id)
+                    if row_idx < 0 or "::" not in col:
+                        continue
+                    self._catat_baris(col.split("::", 1)[0], row_idx + 1)
                 self._version += 1
             except Exception as e:
                 self._rollback(col_snapshots, orig_len)
@@ -191,6 +204,34 @@ class WriteNode:
         target_len = row_idx + 1
         if len(self._df.index) < target_len:
             self._df = self._df.reindex(range(target_len))
+
+    def _extent_frame(self, frame_id: str) -> int:
+        """Perkiraan jumlah baris frame dari kolom namespaced yang sudah ada.
+
+        Dipakai saat catatan baris frame belum ada (mis. frame hasil restore),
+        supaya pencatatan tidak justru memotong baris yang sudah ada.
+        """
+        prefix = f"{frame_id}::"
+        kolom = [c for c in self._df.columns if c.startswith(prefix)]
+        if not kolom:
+            return 0
+        terisi = self._df[kolom].notna().any(axis=1)
+        if not terisi.any():
+            return 0
+        return int(terisi[terisi].index[-1]) + 1
+
+    def _catat_baris(self, frame_id: str, baris: int) -> None:
+        """Catat jumlah baris MILIK satu frame. Lock harus sudah dipegang pemanggil."""
+        if not frame_id or baris <= 0:
+            return
+        lama = self._frame_rows.get(frame_id)
+        if lama is None:
+            # Belum ada catatan (mis. frame hasil restore): ambil luas baris yang
+            # sudah ada supaya pencatatan tidak memotong baris lama.
+            self._frame_rows[frame_id] = max(self._extent_frame(frame_id), baris)
+            return
+        if baris > lama:
+            self._frame_rows[frame_id] = baris
 
     @staticmethod
     def _values_match(current_value: Any, expected_value: Any) -> bool:

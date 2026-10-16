@@ -424,6 +424,24 @@ class DFrame:
         except ValueError:
             return None
 
+    def _catat_baris_frame(self, baris: int) -> None:
+        """Catat jumlah baris MILIK frame ini di write node.
+
+        WriteNode memakai satu DataFrame global berisi kolom semua frame, jadi
+        tanpa catatan ini frame baru mewarisi jumlah baris frame terpanjang.
+        """
+        if baris <= 0:
+            return
+        wn = self._coordinator.write_node
+        with wn._lock:
+            wn._catat_baris(self._frame_id, baris)
+
+    def _potong_ke_baris_frame(self, frame: pd.DataFrame, jumlah: int | None) -> pd.DataFrame:
+        """Batasi snapshot ke jumlah baris milik frame ini (lihat _frame_rows)."""
+        if jumlah is not None and len(frame) > jumlah:
+            return frame.iloc[:jumlah]
+        return frame
+
     def _snapshot_for_frame(self, raw: pd.DataFrame) -> pd.DataFrame:
         """Vectorized - does not use nested loop + .at()"""
         wn = self._coordinator.write_node
@@ -440,6 +458,7 @@ class DFrame:
             result = df[matching].copy()
             result.columns = [c[len(prefix):].rsplit("_", 1)[0]
                               for c in matching]
+            result = self._potong_ke_baris_frame(result, wn._frame_rows.get(self._frame_id))
             return result.reset_index(drop=True)
 
     def _validate_value(self, col: str, value: Any) -> Any:
@@ -486,6 +505,8 @@ class DFrame:
                 wn._df = chunk_frame
             else:
                 wn._df = pd.concat([wn._df, chunk_frame])
+            akhir = row_offset + len(chunk_frame)
+            wn._catat_baris(self._frame_id, akhir)
             wn._version += 1
         return len(chunk_frame)
 
@@ -696,6 +717,7 @@ class DFrame:
         max_len = max((len(v) for v in normalized_data.values()), default=0)
         if max_len == 0:
             return
+        self._catat_baris_frame(max_len)
 
         # Build namespaced columns directly
         namespaced = {
@@ -872,9 +894,10 @@ class DFrame:
             if not matching_cols:
                 return pd.DataFrame()
             subset = df_internal[matching_cols].copy()
+            jumlah_baris = wn._frame_rows.get(self._frame_id)
         # Rename columns by stripping the namespace prefix
         subset.columns = [c[len(prefix):] for c in subset.columns]
-        return subset.reset_index(drop=True)
+        return self._potong_ke_baris_frame(subset, jumlah_baris).reset_index(drop=True)
 
     def _get_cached_snapshot(self) -> pd.DataFrame:
         """Return cached snapshot if write_node hasn't changed; otherwise rebuild."""
