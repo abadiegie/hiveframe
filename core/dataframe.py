@@ -956,6 +956,30 @@ class DFrame:
             return hasil.head(max(1, limit)).to_dict(orient="records")
 
         # Cluster: agregasi bertahap atas potongan global, lalu digabung.
+        # Bila dipanggil dari dalam event loop (mis. endpoint async), jalankan di
+        # thread terpisah karena read_fresh_global_lazy() menolak loop aktif.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._agregasi_cluster(group_cols, value_cols, fungsi, limit, filter_col, filter_value)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="agregasi") as eksekutor:
+            return eksekutor.submit(
+                self._agregasi_cluster, group_cols, value_cols, fungsi, limit, filter_col, filter_value
+            ).result()
+
+    def _agregasi_cluster(
+        self,
+        group_cols: list[str],
+        value_cols: list[str],
+        fungsi: str,
+        limit: int,
+        filter_col: str | None,
+        filter_value: Any,
+    ) -> list[dict[str, Any]]:
+        """Agregasi bertahap atas potongan global. Aman dipanggil di luar event loop."""
         akumulasi: dict[tuple, dict[str, float]] = {}
         jumlah_baris: dict[tuple, int] = {}
         for potongan in self.read_fresh_global_lazy():
