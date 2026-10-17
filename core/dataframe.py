@@ -40,6 +40,21 @@ def _kolom_object_ke_teks(df: pd.DataFrame) -> pd.DataFrame:
     return hasil
 
 
+def _snapshot_dict_ke_frame(snapshot: dict) -> pd.DataFrame:
+    """Susun DataFrame dari snapshot JSON, label indeks dikembalikan ke angka.
+
+    json_safe menyimpan DataFrame sebagai {kolom: {baris: nilai}}, dan JSON
+    mengubah kunci menjadi string. Tanpa konversi ini, penerapan delta akan
+    menambah baris baru alih-alih menimpa baris yang sudah ada.
+    """
+    frame = pd.DataFrame(snapshot)
+    try:
+        frame.index = [int(i) for i in frame.index]
+    except (TypeError, ValueError):
+        pass
+    return frame
+
+
 def _schema_sidecar_path(parquet_path: Path) -> Path:
     return parquet_path.with_suffix(parquet_path.suffix + ".schema.json")
 
@@ -1359,10 +1374,21 @@ class DFrame:
                 return False
         return True
 
+    # Fase 2: checkpoint disimpan sebagai delta terhadap checkpoint sebelumnya.
+    # Salinan penuh dibuat untuk checkpoint pertama, setiap kelipatan interval ini,
+    # atau bila rentangnya memuat perubahan bentuk frame / terlalu banyak op.
+    _CHECKPOINT_FULL_INTERVAL = 50
+    _CHECKPOINT_DELTA_MAX_OPS = 5000
+
     def checkpoint(self, label: str | None = None) -> str:
         """
         Save the current state as a checkpoint.
         Returns a checkpoint_id that can be used for rollback.
+
+        Fase 2: checkpoint hanya menyalin seluruh frame kalau memang perlu. Sisanya
+        disimpan sebagai delta berupa operasi WAL sejak checkpoint induk, sehingga
+        biaya penyimpanan turun dari O(checkpoint x frame) menjadi O(frame +
+        perubahan).
         """
         if not self._transactional:
             raise RuntimeError("checkpoint() is unavailable when transactional=False")
@@ -1371,16 +1397,115 @@ class DFrame:
             self._checkpoints = {}
         checkpoint_id = label or f"cp_{int(time.time())}"
         current_lsn = self._coordinator.wal._next_lsn - 1
-        # Store a DataFrame reference instead of a dict-of-lists.
-        # _get_cached_snapshot() returns the cached frame (already a copy from
-        # _build_local_snapshot); no further copy is needed here because future
-        # writes replace the cache object rather than mutating it.
-        self._checkpoints[checkpoint_id] = {
-            "lsn": current_lsn,
-            "snapshot_df": self._get_cached_snapshot(),
-            "created_at": time.time(),
-        }
+        induk = next(reversed(self._checkpoints), None)
+        self._checkpoints[checkpoint_id] = self._bangun_entri_checkpoint(
+            checkpoint_id, induk, current_lsn, time.time()
+        )
         return checkpoint_id
+
+    def _bangun_entri_checkpoint(
+        self, checkpoint_id: str, induk: str | None, lsn: int, dibuat: float
+    ) -> dict[str, Any]:
+        """Tentukan bentuk entri checkpoint: salinan penuh atau delta."""
+        dasar: dict[str, Any] = {"lsn": lsn, "created_at": dibuat}
+        jumlah = len(self._checkpoints)
+        perlu_penuh = induk is None or jumlah % self._CHECKPOINT_FULL_INTERVAL == 0
+        if perlu_penuh:
+            return {**dasar, "kind": "full", "snapshot_df": self._get_cached_snapshot()}
+
+        entri_induk = self._checkpoints.get(induk) or {}
+        ops = self._ops_sejak(int(entri_induk.get("lsn", 0)))
+        if ops is None:
+            # Delta tidak layak (ada perubahan bentuk atau terlalu banyak op).
+            return {**dasar, "kind": "full", "snapshot_df": self._get_cached_snapshot()}
+        return {**dasar, "kind": "delta", "parent": induk, "ops": ops}
+
+    def _ops_sejak(self, lsn: int) -> list[dict[str, Any]] | None:
+        """Operasi committed setelah lsn, atau None bila delta tidak layak.
+
+        Perubahan bentuk frame mengubah jumlah baris/kolom, sehingga delta berbasis
+        sel tidak cukup untuk menyusunnya kembali; checkpoint seperti itu dibuat
+        penuh.
+        """
+        try:
+            entries = self._coordinator.wal.get_since(lsn)
+        except Exception as exc:  # pragma: no cover - WAL tanpa get_since
+            logger.warning("Checkpoint delta tidak bisa membaca WAL: %s", exc)
+            return None
+        ops: list[dict[str, Any]] = []
+        for entry in entries:
+            if str(entry.get("state", "")).lower() != "committed":
+                continue
+            for op in entry.get("operations", []):
+                if op.get("kind", "set_cell") != "set_cell":
+                    return None
+                ops.append(op)
+                if len(ops) > self._CHECKPOINT_DELTA_MAX_OPS:
+                    return None
+        return ops
+
+    def checkpoint_snapshot(self, checkpoint_id: str) -> pd.DataFrame:
+        """Susun keadaan sheet pada sebuah checkpoint.
+
+        Delta dirangkai ke induknya sampai menemukan checkpoint penuh. Pemakaian
+        utama: diff, rollback, dan pemulihan hivesheet.
+        """
+        return self._materialisasi_checkpoint(checkpoint_id, set())
+
+    def _materialisasi_checkpoint(self, checkpoint_id: str, dikunjungi: set[str]) -> pd.DataFrame:
+        if checkpoint_id in dikunjungi:
+            raise KeyError(f"Rantai checkpoint melingkar pada '{checkpoint_id}'")
+        dikunjungi.add(checkpoint_id)
+        entri = self._checkpoint_entri(checkpoint_id)
+        snapshot = entri.get("snapshot_df")
+        if snapshot is not None:
+            # Checkpoint yang dimuat dari Redis/sidecar berbentuk dict, bukan
+            # DataFrame. Label indeksnya juga kembali sebagai string ("0"), jadi
+            # harus dikembalikan ke angka: tanpa itu penerapan delta akan
+            # menambah baris baru alih-alih menimpa baris yang ada.
+            if isinstance(snapshot, dict):
+                snapshot = _snapshot_dict_ke_frame(snapshot)
+            # Salinan supaya pemanggil tidak bisa mengubah entri checkpoint.
+            return snapshot.copy(deep=True)
+        induk = entri.get("parent")
+        if not induk:
+            raise KeyError(f"Checkpoint '{checkpoint_id}' tidak punya snapshot maupun induk")
+        dasar = self._materialisasi_checkpoint(str(induk), dikunjungi)
+        return self._terapkan_ops_ke_snapshot(dasar, entri.get("ops") or [])
+
+    def _checkpoint_entri(self, checkpoint_id: str) -> dict[str, Any]:
+        if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
+            raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
+        entri = self._checkpoints[checkpoint_id]
+        if not isinstance(entri, dict):
+            raise KeyError(f"Checkpoint '{checkpoint_id}' tidak valid")
+        return entri
+
+    def _terapkan_ops_ke_snapshot(
+        self, dasar: pd.DataFrame, ops: list[dict[str, Any]]
+    ) -> pd.DataFrame:
+        """Terapkan op sel dari WAL ke salinan snapshot."""
+        hasil = dasar.copy(deep=True)
+        prefix = f"{self._frame_id}::{''}"
+        for op in ops:
+            cell_id = str(op.get("cell_id") or "")
+            if not cell_id.startswith(prefix):
+                continue
+            sisa = cell_id[len(prefix):]
+            if "_" not in sisa:
+                continue
+            kolom, baris = sisa.rsplit("_", 1)
+            if not baris.isdigit() or kolom not in hasil.columns:
+                continue
+            idx = int(baris)
+            if idx >= len(hasil):
+                hasil = hasil.reindex(range(idx + 1))
+            hasil.at[idx, kolom] = op.get("new_value")
+        return hasil
+
+    def _checkpoint_lama(self, checkpoint_id: str) -> pd.DataFrame:
+        """Nama lama untuk snapshot checkpoint (dipakai pemanggil lama)."""
+        return self.checkpoint_snapshot(checkpoint_id)
 
     def rollback(self, checkpoint_id: str) -> None:
         """
@@ -1391,7 +1516,9 @@ class DFrame:
             raise RuntimeError("rollback() is unavailable when transactional=False")
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
-        snapshot_df: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
+        # Delta dirangkai ke basisnya supaya rollback tetap bekerja untuk checkpoint
+        # yang tidak menyimpan salinan penuh.
+        snapshot_df: pd.DataFrame = self.checkpoint_snapshot(checkpoint_id)
 
         # Clear all existing columns for this frame namespace before restoring
         prefix = f"{self._frame_id}{self._SEP}"
@@ -1418,20 +1545,33 @@ class DFrame:
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
         import pandas as pd
-        old: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
+        old: pd.DataFrame = self.checkpoint_snapshot(checkpoint_id)
         new = self.read_fresh()
-        # Find changed cells
-        diff = (old != new).stack()
-        changed = diff[diff]
+        # Samakan kolom dan baris lebih dulu: checkpoint lama bisa punya bentuk
+        # berbeda (kolom/baris bertambah atau hilang).
+        old, new = old.align(new, join="outer", axis=1)
+        old, new = old.align(new, join="outer", axis=0)
+        # Sel yang dua-duanya kosong bukan perubahan.
+        berbeda = (old != new) & ~(old.isna() & new.isna())
+        changed = berbeda.stack()
+        changed = changed[changed]
         if changed.empty:
             return pd.DataFrame(columns=["row", "col", "old_value", "new_value"])
-        rows, cols = zip(*changed.index)
-        return pd.DataFrame({
-            "row": rows,
-            "col": cols,
-            "old_value": old.values[changed.index],
-            "new_value": new.values[changed.index],
-        })
+        records = []
+        for baris, kolom in changed.index:
+            try:
+                nomor_baris: Any = int(baris)
+            except (TypeError, ValueError):  # label baris non-angka
+                nomor_baris = baris
+            records.append(
+                {
+                    "row": nomor_baris,
+                    "col": kolom,
+                    "old_value": old.at[baris, kolom],
+                    "new_value": new.at[baris, kolom],
+                }
+            )
+        return pd.DataFrame(records)
 
     def cell_history(self, col: str, row_idx: int) -> list[dict]:
         if not self._transactional:
