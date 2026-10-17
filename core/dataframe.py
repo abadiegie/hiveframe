@@ -1506,6 +1506,19 @@ class DFrame:
         except Exception as exc:  # pragma: no cover - WAL tanpa get_since
             logger.warning("Checkpoint delta tidak bisa membaca WAL: %s", exc)
             return None
+        # Celah kompaksi: bila entri setelah lsn sudah dipangkas, delta tidak bisa
+        # dipercaya. Lebih baik menyimpan checkpoint penuh daripada delta bolong
+        # yang membuat pemulihan diam-diam salah.
+        daftar_lsn = [int(e.get("lsn", 0)) for e in entries if str(e.get("state", "")).lower() == "committed"]
+        next_lsn = int(getattr(self._coordinator.wal, "_next_lsn", 0) or 0)
+        if next_lsn > lsn + 1:
+            if not daftar_lsn or min(daftar_lsn) > lsn + 1:
+                logger.info(
+                    "Checkpoint delta dilewati frame=%s lsn=%s: entri WAL sudah dipangkas",
+                    self._frame_id[:12], lsn,
+                )
+                return None
+
         ops: list[dict[str, Any]] = []
         for entry in entries:
             if str(entry.get("state", "")).lower() != "committed":
