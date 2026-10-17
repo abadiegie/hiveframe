@@ -904,6 +904,10 @@ class DFrame:
         """
         return self._coordinator.write_node.row_ids(self._frame_id)
 
+    def restore_row_ids(self, ids: list[str]) -> None:
+        """Pulihkan identitas baris yang tersimpan, mis. setelah frame dimuat."""
+        self._coordinator.write_node.restore_row_ids(self._frame_id, ids)
+
     def row_id_at(self, position: int) -> str | None:
         """Identitas baris pada posisi tertentu (None bila di luar jangkauan)."""
         ids = self.row_ids()

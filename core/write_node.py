@@ -411,6 +411,23 @@ class WriteNode:
         self._frame_row_seq[frame_id] = seq + 1
         return f"r{seq}"
 
+    def restore_row_ids(self, frame_id: str, ids: list[str]) -> None:
+        """Pulihkan identitas baris yang tersimpan (dipakai saat frame dimuat).
+
+        Penghitung id dinaikkan melewati id yang ada supaya baris baru tidak
+        memakai identitas yang sudah terpakai.
+        """
+        bersih = [str(rid) for rid in ids if str(rid)]
+        if not bersih:
+            return
+        with self._lock:
+            self._frame_row_ids[frame_id] = list(bersih)
+            seq = 0
+            for rid in bersih:
+                if rid.startswith("r") and rid[1:].isdigit():
+                    seq = max(seq, int(rid[1:]) + 1)
+            self._frame_row_seq[frame_id] = max(seq, len(bersih))
+
     def row_ids(self, frame_id: str) -> list[str]:
         """Salinan daftar id baris frame (posisi ke-n = id baris ke-n)."""
         with self._lock:
