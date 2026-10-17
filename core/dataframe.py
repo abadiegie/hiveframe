@@ -916,6 +916,10 @@ class DFrame:
         except ValueError:
             return None
 
+    def row_ids_range(self, start: int = 0, end: int | None = None) -> list[str]:
+        """Id baris untuk rentang posisi tertentu (untuk jendela baca)."""
+        return self._coordinator.write_node.row_ids_range(self._frame_id, start, end)
+
     def row_id_at(self, position: int) -> str | None:
         """Identitas baris pada posisi tertentu (None bila di luar jangkauan)."""
         ids = self.row_ids()

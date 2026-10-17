@@ -433,6 +433,15 @@ class WriteNode:
                     seq = max(seq, int(rid[1:]) + 1)
             self._frame_row_seq[frame_id] = max(seq, len(bersih))
 
+    def row_ids_range(self, frame_id: str, start: int = 0, end: int | None = None) -> list[str]:
+        """Potongan id baris tanpa menyalin seluruh daftar (untuk jendela baca)."""
+        with self._lock:
+            baris = self._frame_rows.get(frame_id)
+            if baris is None:
+                baris = self._extent_frame(frame_id)
+            ids = self._pastikan_row_ids(frame_id, baris)
+            return list(ids[max(0, start) : (len(ids) if end is None else max(0, end))])
+
     def row_ids(self, frame_id: str) -> list[str]:
         """Salinan daftar id baris frame (posisi ke-n = id baris ke-n)."""
         with self._lock:
