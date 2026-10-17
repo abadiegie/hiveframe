@@ -1443,9 +1443,11 @@ class DFrame:
     # Salinan penuh dibuat untuk checkpoint pertama, setiap kelipatan interval ini,
     # atau bila rentangnya memuat perubahan bentuk frame / terlalu banyak op.
     _CHECKPOINT_FULL_INTERVAL = 50
+    # Batas checkpoint otomatis yang disimpan; selebihnya dipangkas otomatis.
+    _CHECKPOINT_AUTO_MAX = 30
     _CHECKPOINT_DELTA_MAX_OPS = 5000
 
-    def checkpoint(self, label: str | None = None) -> str:
+    def checkpoint(self, label: str | None = None, *, auto: bool = False) -> str:
         """
         Save the current state as a checkpoint.
         Returns a checkpoint_id that can be used for rollback.
@@ -1463,9 +1465,16 @@ class DFrame:
         checkpoint_id = label or f"cp_{int(time.time())}"
         current_lsn = self._coordinator.wal._next_lsn - 1
         induk = next(reversed(self._checkpoints), None)
-        self._checkpoints[checkpoint_id] = self._bangun_entri_checkpoint(
-            checkpoint_id, induk, current_lsn, time.time()
-        )
+        entri = self._bangun_entri_checkpoint(checkpoint_id, induk, current_lsn, time.time())
+        # Fase 3: setiap checkpoint adalah sebuah commit pada rantai berparent.
+        entri["commit_id"] = checkpoint_id
+        entri["parent_commit"] = induk
+        entri["auto"] = bool(auto)
+        self._checkpoints[checkpoint_id] = entri
+        if auto:
+            jumlah_auto = sum(1 for e in self._checkpoints.values() if e.get("auto"))
+            if jumlah_auto > self._CHECKPOINT_AUTO_MAX:
+                self.prune_checkpoints(keep_last=self._CHECKPOINT_AUTO_MAX, keep_named=True)
         return checkpoint_id
 
     def _bangun_entri_checkpoint(
@@ -1597,11 +1606,102 @@ class DFrame:
         self._invalidate_snapshot_cache()
         self._seed_initial_data(snapshot_df.to_dict(orient="list"))
 
+    def head_commit(self) -> str | None:
+        """Commit terbaru (HEAD) pada rantai checkpoint."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        return next(reversed(kumpulan), None)
+
+    def resolve_ref(self, name: str) -> str | None:
+        """Selesaikan ref menjadi commit id: HEAD, nama checkpoint, atau commit id."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        if not kumpulan:
+            return None
+        if str(name).strip().upper() == "HEAD":
+            return self.head_commit()
+        if name in kumpulan:
+            return name
+        for cid, entri in kumpulan.items():
+            if entri.get("commit_id") == name:
+                return cid
+        return None
+
+    def list_commits(self) -> list[dict[str, Any]]:
+        """Riwayat commit pada rantai, urut dari terlama ke terbaru."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        return [
+            {
+                "commit_id": str(entri.get("commit_id") or cid),
+                "parent_commit": entri.get("parent_commit"),
+                "lsn": entri.get("lsn"),
+                "created_at": entri.get("created_at"),
+                "auto": bool(entri.get("auto")),
+                "kind": entri.get("kind", "full"),
+            }
+            for cid, entri in kumpulan.items()
+        ]
+
+    def prune_checkpoints(self, keep_last: int = 20, keep_named: bool = True) -> int:
+        """Buang checkpoint lama (gc), pertahankan N terakhir dan checkpoint manual.
+
+        Rantai harus tetap utuh: seluruh baris sejak checkpoint tertua yang
+        dipertahankan ikut disimpan, dan checkpoint manual yang lebih tua
+        dimekarkan menjadi snapshot penuh (rebase) supaya tidak lagi bergantung
+        pada basis yang dibuang. Mengembalikan jumlah entri yang dibuang.
+        """
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        if len(kumpulan) <= keep_last:
+            return 0
+        urutan = list(kumpulan)
+        batas = max(0, len(urutan) - max(0, keep_last))
+        dipertahankan = urutan[batas:]
+        # Checkpoint manual yang lebih tua tetap disimpan, tetapi harus mandiri.
+        if keep_named:
+            for cid in urutan[:batas]:
+                if not (kumpulan.get(cid) or {}).get("auto"):
+                    self._rebase_checkpoint(cid)
+                    dipertahankan = [cid] + dipertahankan
+        # Elemen tertua yang dipertahankan harus mandiri: bila masih delta, ia
+        # menunjuk induk yang ikut dibuang, sehingga rantai akan terputus.
+        if dipertahankan:
+            self._rebase_checkpoint(dipertahankan[0])
+        dibuang = [cid for cid in urutan if cid not in set(dipertahankan)]
+        for cid in dibuang:
+            kumpulan.pop(cid, None)
+        if dibuang:
+            logger.info(
+                "Prune checkpoint frame=%s dibuang=%d dipertahankan=%d",
+                self._frame_id[:12], len(dibuang), len(dipertahankan),
+            )
+        return len(dibuang)
+
+    def _rebase_checkpoint(self, checkpoint_id: str) -> None:
+        """Ubah checkpoint delta menjadi penuh agar tidak bergantung pada induknya."""
+        entri = self._checkpoints.get(checkpoint_id)
+        if not isinstance(entri, dict) or entri.get("kind") != "delta":
+            return
+        try:
+            snapshot = self.checkpoint_snapshot(checkpoint_id)
+        except Exception as exc:  # pragma: no cover - data checkpoint rusak
+            logger.warning("Rebase checkpoint %s gagal: %s", checkpoint_id, exc)
+            return
+        entri["kind"] = "full"
+        entri["snapshot_df"] = snapshot
+        entri["parent"] = None
+        entri["ops"] = []
+
     def list_checkpoints(self) -> list[dict]:
         if not hasattr(self, '_checkpoints'):
             return []
         return [
-            {"id": k, "lsn": v["lsn"], "created_at": v["created_at"]}
+            {
+                "id": k,
+                "lsn": v.get("lsn"),
+                "created_at": v.get("created_at"),
+                "commit_id": v.get("commit_id", k),
+                "parent_commit": v.get("parent_commit"),
+                "auto": bool(v.get("auto")),
+                "kind": v.get("kind", "full"),
+            }
             for k, v in self._checkpoints.items()
         ]
 
