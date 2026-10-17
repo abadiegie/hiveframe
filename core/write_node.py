@@ -42,6 +42,13 @@ class WriteNode:
         # frame ikut jumlah baris frame terpanjang (frame baru jadi penuh baris
         # kosong, dan parquet-nya ikut membengkak).
         self._frame_rows: dict[str, int] = {}
+        # Fase 1: identitas baris stabil per frame. Posisi baris tetap dipakai
+        # sebagai indeks penyimpanan, tetapi setiap baris punya id yang tidak
+        # berubah saat baris lain dihapus atau disisipkan. Catatan ini in-memory
+        # (dibangun ulang secara deterministik untuk frame lama); yang durabel
+        # adalah id yang ikut tercatat di payload operasi struktural.
+        self._frame_row_ids: dict[str, list[str]] = {}
+        self._frame_row_seq: dict[str, int] = {}
         self._delta_callback: DeltaCallback | None = None
         self._bulk_mode = bulk_mode
         logger.info("WriteNode initialized columns=%s rows=%d bulk_mode=%s", list(self._df.columns), len(self._df.index), bulk_mode)
@@ -266,20 +273,38 @@ class WriteNode:
             jumlah = int(payload.get("count", 0))
             if jumlah <= 0:
                 return
-            posisi = int(payload.get("at", baris_kini))
-            if posisi != baris_kini:
-                raise ValueError("insert_rows Fase 0 hanya mendukung penambahan di akhir")
+            posisi = max(0, min(int(payload.get("at", baris_kini)), baris_kini))
             target = baris_kini + jumlah
             self._ensure_row(target - 1)
+            ids = self._pastikan_row_ids(frame_id, baris_kini)
+            if posisi < baris_kini:
+                # Sisip di tengah: geser baris [posisi, baris_kini) turun sebanyak
+                # jumlah baris baru. Nilainya tetap, posisinya yang berubah.
+                for col in kolom_frame:
+                    seri = self._df[col].iloc[:baris_kini]
+                    gabung = pd.concat([
+                        seri.iloc[:posisi],
+                        pd.Series([None] * jumlah, index=range(posisi, posisi + jumlah)),
+                        seri.iloc[posisi:],
+                    ])
+                    gabung.index = range(len(gabung))
+                    self._df[col] = gabung.reindex(self._df.index)
             nilai = payload.get("default")
             if nilai is not None:
                 for col in kolom_frame:
-                    self._df.loc[baris_kini : target - 1, col] = nilai
-            self._catat_baris(frame_id, target)
+                    self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
+            # Identitas baris baru disisipkan di posisi yang sama.
+            ids[posisi:posisi] = [self._next_row_id(frame_id) for _ in range(jumlah)]
+            self._frame_rows[frame_id] = target
             return
 
         if op.kind == "delete_rows":
-            baris = sorted({int(i) for i in (payload.get("rows") or []) if 0 <= int(i) < baris_kini})
+            ids = self._pastikan_row_ids(frame_id, baris_kini)
+            # Baris boleh ditunjuk lewat posisi (rows) atau identitas (row_ids).
+            dari_id = {ids.index(rid) for rid in (payload.get("row_ids") or []) if rid in ids}
+            baris = sorted(dari_id | {
+                int(i) for i in (payload.get("rows") or []) if 0 <= int(i) < baris_kini
+            })
             if not baris or not kolom_frame:
                 return
             for col in kolom_frame:
@@ -288,6 +313,11 @@ class WriteNode:
                 # Panjang _df tetap; sisa di ekor menjadi kosong dan tidak
                 # terlihat karena catatan baris frame ikut menyusut.
                 self._df[col] = seri.reindex(self._df.index)
+            # Catat identitas yang hilang agar pemulihan tidak bergantung posisi.
+            payload["deleted_row_ids"] = [ids[i] for i in baris]
+            op.payload = payload
+            for i in sorted(baris, reverse=True):
+                ids.pop(i)
             # Catatan baris frame harus bisa menyusut; _catat_baris hanya menumbuhkan.
             self._frame_rows[frame_id] = max(0, baris_kini - len(baris))
             return
@@ -362,6 +392,32 @@ class WriteNode:
             return
         if baris > lama:
             self._frame_rows[frame_id] = baris
+
+    def _pastikan_row_ids(self, frame_id: str, jumlah: int) -> list[str]:
+        """Daftar id baris frame, dibangun deterministik bila belum ada.
+
+        Lock harus sudah dipegang pemanggil.
+        """
+        ids = self._frame_row_ids.setdefault(frame_id, [])
+        seq = self._frame_row_seq.get(frame_id, 0)
+        while len(ids) < jumlah:
+            ids.append(f"r{seq}")
+            seq += 1
+        self._frame_row_seq[frame_id] = max(seq, len(ids))
+        return ids
+
+    def _next_row_id(self, frame_id: str) -> str:
+        seq = self._frame_row_seq.get(frame_id, 0)
+        self._frame_row_seq[frame_id] = seq + 1
+        return f"r{seq}"
+
+    def row_ids(self, frame_id: str) -> list[str]:
+        """Salinan daftar id baris frame (posisi ke-n = id baris ke-n)."""
+        with self._lock:
+            baris = self._frame_rows.get(frame_id)
+            if baris is None:
+                baris = self._extent_frame(frame_id)
+            return list(self._pastikan_row_ids(frame_id, baris))
 
     @staticmethod
     def _values_match(current_value: Any, expected_value: Any) -> bool:

@@ -896,13 +896,50 @@ class DFrame:
         node_id = "local" if self._runtime is None else self._get_owner_node_id(0)
         self._submit_routed({node_id: [op]})
 
+    def row_ids(self) -> list[str]:
+        """Identitas stabil tiap baris, urut sesuai posisi saat ini.
+
+        Identitas dibangun deterministik untuk frame lama dan tetap sama saat
+        baris lain dihapus atau disisipkan.
+        """
+        return self._coordinator.write_node.row_ids(self._frame_id)
+
+    def row_id_at(self, position: int) -> str | None:
+        """Identitas baris pada posisi tertentu (None bila di luar jangkauan)."""
+        ids = self.row_ids()
+        if 0 <= position < len(ids):
+            return ids[position]
+        return None
+
+    def insert_rows(self, count: int, at: int | None = None, default: Any = None) -> None:
+        """Sisipkan `count` baris pada posisi `at` (default: akhir frame)."""
+        payload: dict[str, Any] = {"count": int(count), "default": default}
+        if at is not None:
+            payload["at"] = int(at)
+        self.submit_structural("insert_rows", payload)
+
     def append_rows(self, count: int, default: Any = None) -> None:
         """Tambah `count` baris di akhir frame sebagai satu operasi struktural."""
-        self.submit_structural("insert_rows", {"count": int(count), "default": default})
+        self.insert_rows(int(count), at=None, default=default)
 
-    def delete_rows(self, rows: list[int]) -> None:
-        """Hapus baris berdasarkan indeks posisi sebagai satu operasi struktural."""
-        self.submit_structural("delete_rows", {"rows": [int(r) for r in rows]})
+    def delete_rows(
+        self,
+        rows: list[int] | None = None,
+        row_ids: list[str] | None = None,
+    ) -> None:
+        """Hapus baris berdasarkan posisi, identitas, atau keduanya.
+
+        Operasi mencatat identitas baris yang terhapus (deleted_row_ids) di payload
+        supaya pemulihan tidak bergantung pada posisi yang bisa bergeser.
+        """
+        payload: dict[str, Any] = {}
+        if rows:
+            payload["rows"] = [int(r) for r in rows]
+        if row_ids:
+            payload["row_ids"] = [str(r) for r in row_ids]
+        if not payload:
+            return
+        self.submit_structural("delete_rows", payload)
 
     def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> None:
         """Tambah kolom pada posisi `at` sebagai satu operasi struktural."""
