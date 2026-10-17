@@ -905,6 +905,94 @@ class DFrame:
             )
         return berhasil
 
+    def groupby_aggregate(
+        self,
+        group_cols: list[str],
+        value_cols: list[str],
+        how: str = "sum",
+        limit: int = 50,
+        *,
+        filter_col: str | None = None,
+        filter_value: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Agregasi kelompok tanpa memindahkan seluruh baris ke pemanggil.
+
+        Mode standalone: group-by langsung pada snapshot lokal (satu node).
+        Mode cluster: setiap potongan dibaca berurutan lewat jalur global lalu
+        digabung secara bertahap, sehingga hasilnya benar untuk data yang
+        terpartisi antar node tanpa memuat semuanya sekaligus.
+
+        Operasi yang didukung: sum, count, min, max, mean. Hasil dibatasi
+        `limit` baris teratas menurut kolom nilai pertama (menurun).
+        """
+        fungsi = str(how or "sum").strip().lower()
+        if fungsi not in {"sum", "count", "min", "max", "mean"}:
+            raise ValueError(f"Fungsi agregasi '{how}' tidak dikenal")
+        if not group_cols:
+            raise ValueError("group_cols wajib diisi")
+        if fungsi != "count" and not value_cols:
+            raise ValueError("value_cols wajib diisi untuk fungsi selain count")
+
+        segar = self.read_fresh()
+        for kolom in [*group_cols, *value_cols, *([filter_col] if filter_col else [])]:
+            if kolom not in segar.columns:
+                raise KeyError(kolom)
+
+        # Standalone: satu group-by lokal, tanpa streaming.
+        if self._runtime is None:
+            potongan = segar
+            if filter_col is not None:
+                potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
+            kunci = group_cols
+            if fungsi == "count":
+                hasil = potongan.groupby(kunci, dropna=False).size().reset_index(name="jumlah")
+            elif fungsi == "mean":
+                hasil = potongan.groupby(kunci, dropna=False)[value_cols].mean().reset_index()
+            else:
+                hasil = getattr(potongan.groupby(kunci, dropna=False)[value_cols], fungsi)().reset_index()
+            urut = value_cols[0] if value_cols else "jumlah"
+            if urut in hasil.columns:
+                hasil = hasil.sort_values(urut, ascending=False)
+            return hasil.head(max(1, limit)).to_dict(orient="records")
+
+        # Cluster: agregasi bertahap atas potongan global, lalu digabung.
+        akumulasi: dict[tuple, dict[str, float]] = {}
+        jumlah_baris: dict[tuple, int] = {}
+        for potongan in self.read_fresh_global_lazy():
+            if filter_col is not None:
+                potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
+            if potongan.empty:
+                continue
+            for kunci, grup in potongan.groupby(group_cols, dropna=False):
+                kunci_tuple = kunci if isinstance(kunci, tuple) else (kunci,)
+                nilai = akumulasi.setdefault(kunci_tuple, {})
+                jumlah_baris[kunci_tuple] = jumlah_baris.get(kunci_tuple, 0) + len(grup)
+                for kolom in value_cols:
+                    seri = pd.to_numeric(grup[kolom], errors="coerce")
+                    if fungsi in {"sum", "mean"}:
+                        nilai[kolom] = nilai.get(kolom, 0.0) + float(seri.sum())
+                    elif fungsi == "min":
+                        nilai[kolom] = min(nilai.get(kolom, float("inf")), float(seri.min()))
+                    elif fungsi == "max":
+                        nilai[kolom] = max(nilai.get(kolom, float("-inf")), float(seri.max()))
+
+        hasil: list[dict[str, Any]] = []
+        for kunci_tuple, nilai in akumulasi.items():
+            baris: dict[str, Any] = dict(zip(group_cols, kunci_tuple))
+            if fungsi == "count":
+                baris["jumlah"] = jumlah_baris[kunci_tuple]
+            else:
+                for kolom in value_cols:
+                    total = nilai.get(kolom, 0.0)
+                    baris[kolom] = (
+                        total / jumlah_baris[kunci_tuple] if fungsi == "mean" and jumlah_baris[kunci_tuple] else total
+                    )
+            hasil.append(baris)
+        urut = value_cols[0] if value_cols else "jumlah"
+        if hasil and urut in hasil[0]:
+            hasil.sort(key=lambda r: r.get(urut) or 0, reverse=True)
+        return hasil[: max(1, limit)]
+
     def row_ids(self) -> list[str]:
         """Identitas stabil tiap baris, urut sesuai posisi saat ini.
 
