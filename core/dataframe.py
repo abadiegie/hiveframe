@@ -874,8 +874,12 @@ class DFrame:
         *,
         author_type: str = "human",
         author_id: str | None = "user",
-    ) -> None:
+    ) -> bool:
         """Kirim satu operasi struktural (perubahan bentuk frame) ke WAL.
+
+        Mengembalikan True bila transaksi berakhir COMMITTED. Pemanggil seperti
+        tool agent perlu tahu kegagalan (mis. kolom tidak ada), karena sebelumnya
+        kegagalan tertelan tanpa jejak.
 
         Berbeda dari __setitem__ yang membuat satu operasi per sel, satu operasi
         struktural mewakili seluruh perubahan: menambah atau menghapus baris dan
@@ -894,7 +898,12 @@ class DFrame:
         )
         self._invalidate_snapshot_cache()
         node_id = "local" if self._runtime is None else self._get_owner_node_id(0)
-        self._submit_routed({node_id: [op]})
+        berhasil = self._submit_routed({node_id: [op]})
+        if not berhasil:
+            logger.warning(
+                "Operasi struktural %s gagal frame=%s", kind, self._frame_id[:12]
+            )
+        return berhasil
 
     def row_ids(self) -> list[str]:
         """Identitas stabil tiap baris, urut sesuai posisi saat ini.
@@ -944,11 +953,11 @@ class DFrame:
             payload["at"] = int(at)
         if row_ids:
             payload["row_ids"] = [str(rid) for rid in row_ids]
-        self.submit_structural("insert_rows", payload)
+        return self.submit_structural("insert_rows", payload)
 
     def append_rows(self, count: int, default: Any = None) -> None:
         """Tambah `count` baris di akhir frame sebagai satu operasi struktural."""
-        self.insert_rows(int(count), at=None, default=default)
+        return self.insert_rows(int(count), at=None, default=default)
 
     def delete_rows(
         self,
@@ -967,11 +976,19 @@ class DFrame:
             payload["row_ids"] = [str(r) for r in row_ids]
         if not payload:
             return
-        self.submit_structural("delete_rows", payload)
+        return self.submit_structural("delete_rows", payload)
+
+    def rename_column(self, name: str, new_name: str) -> None:
+        """Ganti nama kolom sebagai satu operasi struktural."""
+        return self.submit_structural("rename_column", {"name": name, "new_name": new_name})
+        # Skema per kolom (bila ada) ikut pindah nama.
+        skema = getattr(self, "_schema", None)
+        if isinstance(skema, dict) and name in skema:
+            skema[new_name] = skema.pop(name)
 
     def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> None:
         """Tambah kolom pada posisi `at` sebagai satu operasi struktural."""
-        self.submit_structural("insert_column", {"name": name, "values": values, "at": at})
+        return self.submit_structural("insert_column", {"name": name, "values": values, "at": at})
 
     def drop_column(self, name: str, values: list[Any] | None = None) -> None:
         """Hapus kolom lewat WAL sebagai satu operasi struktural.
@@ -983,9 +1000,9 @@ class DFrame:
         payload: dict[str, Any] = {"name": name}
         if values is not None:
             payload["values"] = list(values)
-        self.submit_structural("delete_column", payload)
+        return self.submit_structural("delete_column", payload)
 
-    def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> None:
+    def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> bool:
         """Submit operation groups to the correct coordinator per owning node."""
         # Capability gate: check if this node can accept writes.
         # Only enforced when cluster is enabled — prevents silent corruption.
@@ -999,16 +1016,23 @@ class DFrame:
                     "This node is read-only or draining. Route writes to an 'rw' node."
                 )
 
+        berhasil = True
         for node_id, ops in node_ops.items():
             if not ops:
                 continue
             coordinator = self._resolve_coordinator(node_id)
             if self._transactional:
-                coordinator.submit(ops)
+                tx = coordinator.submit(ops)
+                status = getattr(getattr(tx, "state", None), "name", str(getattr(tx, "state", "")))
+                # Sukses bisa berakhir COMMITTED, SYNCING, atau SYNCED tergantung
+                # konfigurasi sinkronisasi; yang gagal hanya FAILED/ROLLED_BACK.
+                if status not in {"COMMITTED", "SYNCING", "SYNCED"}:
+                    berhasil = False
             else:
                 ok = coordinator.submit_non_transactional(ops)
                 if not ok:
                     raise RuntimeError(f"Non-transactional write failed on node '{node_id}'")
+        return berhasil
 
     def _resolve_coordinator(self, node_id: str) -> "TransactionCoordinator":
         """Resolve coordinator for a given node_id.

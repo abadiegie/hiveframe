@@ -11,6 +11,8 @@ bergantung pada posisi yang bergeser.
 
 from __future__ import annotations
 
+import pytest
+
 from core.dataframe import DFrame
 
 
@@ -112,3 +114,23 @@ class TestPemulihanIdentitas:
         assert len(set(ids)) == len(ids)
         assert ids[0] == ada
         assert ids[1] != ada
+
+
+class TestRenameKolom:
+    def test_rename_mempertahankan_nilai(self) -> None:
+        df = _frame({"skor": [10, 20]}, "rename-ok")
+
+        df.rename_column("skor", "nilai")
+
+        assert df.read_fresh().columns.tolist() == ["nilai"]
+        assert df.read_fresh()["nilai"].tolist() == [10, 20]
+
+    def test_rename_menolak_nama_yang_sudah_ada(self) -> None:
+        df = _frame({"a": [1], "b": [2]}, "rename-bentrok")
+
+        hasil = df.rename_column("a", "b")
+
+        # Nama bentrok ditolak: kolom dan isinya tidak berubah.
+        assert hasil is False
+        assert df.read_fresh().columns.tolist() == ["a", "b"]
+        assert df.read_fresh()["a"].tolist() == [1]

@@ -327,6 +327,21 @@ class WriteNode:
             self._frame_rows[frame_id] = max(0, baris_kini - len(baris))
             return
 
+        if op.kind == "rename_column":
+            lama = str(payload.get("name") or "")
+            baru = str(payload.get("new_name") or "")
+            if not lama or not baru or lama == baru:
+                return
+            kolom_lama = f"{prefix}{lama}"
+            kolom_baru = f"{prefix}{baru}"
+            if kolom_lama not in self._df.columns:
+                raise ValueError(f"Kolom '{lama}' tidak ada")
+            if kolom_baru in self._df.columns:
+                raise ValueError(f"Kolom '{baru}' sudah ada")
+            self._df = self._df.rename(columns={kolom_lama: kolom_baru})
+            self._version += 1
+            return
+
         if op.kind == "insert_column":
             nama = str(payload.get("name") or "")
             if not nama:
