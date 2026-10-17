@@ -908,6 +908,14 @@ class DFrame:
         """Pulihkan identitas baris yang tersimpan, mis. setelah frame dimuat."""
         self._coordinator.write_node.restore_row_ids(self._frame_id, ids)
 
+    def position_of_row(self, row_id: str) -> int | None:
+        """Posisi baris dengan identitas tertentu (None bila tidak ada)."""
+        ids = self.row_ids()
+        try:
+            return ids.index(str(row_id))
+        except ValueError:
+            return None
+
     def row_id_at(self, position: int) -> str | None:
         """Identitas baris pada posisi tertentu (None bila di luar jangkauan)."""
         ids = self.row_ids()
@@ -915,11 +923,23 @@ class DFrame:
             return ids[position]
         return None
 
-    def insert_rows(self, count: int, at: int | None = None, default: Any = None) -> None:
-        """Sisipkan `count` baris pada posisi `at` (default: akhir frame)."""
+    def insert_rows(
+        self,
+        count: int,
+        at: int | None = None,
+        default: Any = None,
+        row_ids: list[str] | None = None,
+    ) -> None:
+        """Sisipkan `count` baris pada posisi `at` (default: akhir frame).
+
+        `row_ids` opsional dipakai untuk mengembalikan identitas baris yang pernah
+        dihapus (mis. saat memulihkan baris).
+        """
         payload: dict[str, Any] = {"count": int(count), "default": default}
         if at is not None:
             payload["at"] = int(at)
+        if row_ids:
+            payload["row_ids"] = [str(rid) for rid in row_ids]
         self.submit_structural("insert_rows", payload)
 
     def append_rows(self, count: int, default: Any = None) -> None:

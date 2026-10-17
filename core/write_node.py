@@ -293,8 +293,13 @@ class WriteNode:
             if nilai is not None:
                 for col in kolom_frame:
                     self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
-            # Identitas baris baru disisipkan di posisi yang sama.
-            ids[posisi:posisi] = [self._next_row_id(frame_id) for _ in range(jumlah)]
+            # Identitas yang diminta dipakai lebih dulu (mis. pemulihan baris yang
+            # pernah dihapus), sisanya dibuat baru.
+            diminta = [str(x) for x in (payload.get("row_ids") or []) if str(x)][:jumlah]
+            diminta = [rid for rid in diminta if rid not in ids]
+            ids[posisi:posisi] = diminta + [
+                self._next_row_id(frame_id) for _ in range(jumlah - len(diminta))
+            ]
             self._frame_rows[frame_id] = target
             return
 
