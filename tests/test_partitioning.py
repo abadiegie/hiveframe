@@ -99,3 +99,18 @@ class TestAgregasiLintasPotongan:
         )
 
         assert hasil == [{"platform": "tt", "impresi": 120.0}]
+
+
+class TestHostAdvertise:
+    def test_alamat_bind_diganti_loopback(self) -> None:
+        from core.cluster_runtime import _host_untuk_diadvertise
+
+        assert _host_untuk_diadvertise("0.0.0.0") == "127.0.0.1"
+        assert _host_untuk_diadvertise("::") == "127.0.0.1"
+        assert _host_untuk_diadvertise("") == "127.0.0.1"
+
+    def test_alamat_lan_dipertahankan(self) -> None:
+        from core.cluster_runtime import _host_untuk_diadvertise
+
+        assert _host_untuk_diadvertise("10.0.0.5") == "10.0.0.5"
+        assert _host_untuk_diadvertise("127.0.0.1") == "127.0.0.1"
