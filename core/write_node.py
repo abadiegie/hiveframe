@@ -37,6 +37,18 @@ class WriteNode:
         self._lock = Lock()
         self._df = pd.DataFrame(initial_data or {})
         self._version = 0
+        # Jumlah baris MILIK tiap frame. WriteNode menyimpan satu DataFrame global
+        # berisi kolom semua frame, sehingga tanpa catatan ini jumlah baris sebuah
+        # frame ikut jumlah baris frame terpanjang (frame baru jadi penuh baris
+        # kosong, dan parquet-nya ikut membengkak).
+        self._frame_rows: dict[str, int] = {}
+        # Fase 1: identitas baris stabil per frame. Posisi baris tetap dipakai
+        # sebagai indeks penyimpanan, tetapi setiap baris punya id yang tidak
+        # berubah saat baris lain dihapus atau disisipkan. Catatan ini in-memory
+        # (dibangun ulang secara deterministik untuk frame lama); yang durabel
+        # adalah id yang ikut tercatat di payload operasi struktural.
+        self._frame_row_ids: dict[str, list[str]] = {}
+        self._frame_row_seq: dict[str, int] = {}
         self._delta_callback: DeltaCallback | None = None
         self._bulk_mode = bulk_mode
         logger.info("WriteNode initialized columns=%s rows=%d bulk_mode=%s", list(self._df.columns), len(self._df.index), bulk_mode)
@@ -54,16 +66,39 @@ class WriteNode:
             # when many DFrame columns coexist in _df.
             touched_cols: set[str] = set()
             for op in transaction.operations:
+                if getattr(op, "kind", "set_cell") != "set_cell":
+                    # Operasi struktural tidak punya cell_id sel; kolomnya
+                    # disimpan terpisah di frame_snapshots di bawah.
+                    continue
                 col, row_idx = self._parse_cell_id(op.cell_id)
                 if row_idx >= 0:
                     touched_cols.add(col)
             col_snapshots: dict[str, Any] = {
                 c: self._df[c].copy() for c in touched_cols if c in self._df.columns
             }
+            # Snapshot per frame untuk operasi struktural: cukup kolom milik frame
+            # itu, bukan seluruh _df yang dipakai bersama banyak frame.
+            frame_snapshots: dict[str, tuple[dict[str, Any], int | None]] = {}
+            for op in transaction.operations:
+                if getattr(op, "kind", "set_cell") == "set_cell":
+                    continue
+                fid = str((op.payload or {}).get("frame_id") or "")
+                if not fid or fid in frame_snapshots:
+                    continue
+                prefix = f"{fid}::"
+                frame_snapshots[fid] = (
+                    {c: self._df[c].copy() for c in self._df.columns if c.startswith(prefix)},
+                    self._frame_rows.get(fid),
+                )
             orig_len = len(self._df.index)
             try:
                 delta: list[dict[str, Any]] = []
                 for op in transaction.operations:
+                    if getattr(op, "kind", "set_cell") != "set_cell":
+                        # Perubahan bentuk frame: satu operasi, bukan ribuan sel.
+                        self._apply_structural(op)
+                        delta.append(op.to_dict())
+                        continue
                     col, row_idx = self._parse_cell_id(op.cell_id)
                     # Skip bulk operation markers — not real cell writes
                     if row_idx < 0:
@@ -80,7 +115,7 @@ class WriteNode:
                             current_value,
                             op.old_value,
                         )
-                        self._rollback(col_snapshots, orig_len)
+                        self._rollback(col_snapshots, orig_len, frame_snapshots)
                         return False
                     try:
                         self._df.at[row_idx, col] = op.new_value
@@ -101,9 +136,19 @@ class WriteNode:
                         else:
                             raise
                     delta.append(op.to_dict())
+                # Catat jumlah baris milik tiap frame yang tersentuh transaksi ini.
+                # Beberapa frame berbagi satu _df, jadi tanpa catatan ini frame
+                # pendek terbaca sepanjang frame terpanjang (berisi null).
+                for op in transaction.operations:
+                    if getattr(op, "kind", "set_cell") != "set_cell":
+                        continue  # pencatatan barisnya ditangani _apply_structural
+                    col, row_idx = self._parse_cell_id(op.cell_id)
+                    if row_idx < 0 or "::" not in col:
+                        continue
+                    self._catat_baris(col.split("::", 1)[0], row_idx + 1)
                 self._version += 1
             except Exception as e:
-                self._rollback(col_snapshots, orig_len)
+                self._rollback(col_snapshots, orig_len, frame_snapshots)
                 logger.exception("WriteNode.apply failed tx_id=%s error=%s", transaction.tx_id, e)
                 return False
 
@@ -180,17 +225,245 @@ class WriteNode:
             logger.debug("WriteNode.read_fresh_lazy chunk start=%d size=%d", start, len(chunk))
             yield chunk
 
-    def _rollback(self, col_snapshots: dict[str, Any], orig_len: int) -> None:
+    def _rollback(
+        self,
+        col_snapshots: dict[str, Any],
+        orig_len: int,
+        frame_snapshots: dict[str, tuple[dict[str, Any], int | None]] | None = None,
+    ) -> None:
         # Trim any rows added during the failed transaction.
         if len(self._df.index) > orig_len:
             self._df = self._df.iloc[:orig_len]
         for col, series in col_snapshots.items():
             self._df[col] = series
+        # Pulihkan kolom per frame untuk operasi struktural: kolom baru dibuang,
+        # kolom yang berubah dikembalikan, dan catatan barisnya direset.
+        for fid, (snapshot, baris_lama) in (frame_snapshots or {}).items():
+            prefix = f"{fid}::"
+            for col in [c for c in self._df.columns if c.startswith(prefix)]:
+                if col not in snapshot:
+                    self._df = self._df.drop(columns=[col])
+            for col, series in snapshot.items():
+                self._df[col] = series.reindex(self._df.index)
+            if baris_lama is None:
+                self._frame_rows.pop(fid, None)
+            else:
+                self._frame_rows[fid] = baris_lama
+
+    def _apply_structural(self, op: Any) -> None:
+        """Terapkan satu operasi struktural pada frame pemiliknya.
+
+        Fase 0 mendukung:
+        - insert_rows: menambah baris DI AKHIR frame (payload: count, default)
+        - delete_rows: menghapus baris berdasarkan indeks (payload: rows)
+        - insert_column: menambah kolom pada posisi tertentu (payload: name, at, values)
+        - delete_column: menghapus kolom (payload: name)
+        """
+        payload = dict(op.payload or {})
+        frame_id = str(payload.get("frame_id") or "")
+        if not frame_id:
+            raise ValueError("operasi struktural butuh payload.frame_id")
+        prefix = f"{frame_id}::"
+        kolom_frame = [c for c in self._df.columns if c.startswith(prefix)]
+        baris_kini = self._frame_rows.get(frame_id)
+        if baris_kini is None:
+            baris_kini = self._extent_frame(frame_id)
+
+        if op.kind == "insert_rows":
+            jumlah = int(payload.get("count", 0))
+            if jumlah <= 0:
+                return
+            posisi = max(0, min(int(payload.get("at", baris_kini)), baris_kini))
+            target = baris_kini + jumlah
+            self._ensure_row(target - 1)
+            ids = self._pastikan_row_ids(frame_id, baris_kini)
+            if posisi < baris_kini:
+                # Sisip di tengah: geser baris [posisi, baris_kini) turun sebanyak
+                # jumlah baris baru. Nilainya tetap, posisinya yang berubah.
+                for col in kolom_frame:
+                    seri = self._df[col].iloc[:baris_kini]
+                    gabung = pd.concat([
+                        seri.iloc[:posisi],
+                        pd.Series([None] * jumlah, index=range(posisi, posisi + jumlah)),
+                        seri.iloc[posisi:],
+                    ])
+                    gabung.index = range(len(gabung))
+                    self._df[col] = gabung.reindex(self._df.index)
+            nilai = payload.get("default")
+            if nilai is not None:
+                for col in kolom_frame:
+                    self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
+            # Identitas yang diminta dipakai lebih dulu (mis. pemulihan baris yang
+            # pernah dihapus), sisanya dibuat baru.
+            diminta = [str(x) for x in (payload.get("row_ids") or []) if str(x)][:jumlah]
+            diminta = [rid for rid in diminta if rid not in ids]
+            ids[posisi:posisi] = diminta + [
+                self._next_row_id(frame_id) for _ in range(jumlah - len(diminta))
+            ]
+            self._frame_rows[frame_id] = target
+            return
+
+        if op.kind == "delete_rows":
+            ids = self._pastikan_row_ids(frame_id, baris_kini)
+            # Baris boleh ditunjuk lewat posisi (rows) atau identitas (row_ids).
+            dari_id = {ids.index(rid) for rid in (payload.get("row_ids") or []) if rid in ids}
+            baris = sorted(dari_id | {
+                int(i) for i in (payload.get("rows") or []) if 0 <= int(i) < baris_kini
+            })
+            if not baris or not kolom_frame:
+                return
+            for col in kolom_frame:
+                seri = self._df[col].iloc[:baris_kini].drop(index=baris)
+                seri.index = range(len(seri))
+                # Panjang _df tetap; sisa di ekor menjadi kosong dan tidak
+                # terlihat karena catatan baris frame ikut menyusut.
+                self._df[col] = seri.reindex(self._df.index)
+            # Catat identitas yang hilang agar pemulihan tidak bergantung posisi.
+            payload["deleted_row_ids"] = [ids[i] for i in baris]
+            op.payload = payload
+            for i in sorted(baris, reverse=True):
+                ids.pop(i)
+            # Catatan baris frame harus bisa menyusut; _catat_baris hanya menumbuhkan.
+            self._frame_rows[frame_id] = max(0, baris_kini - len(baris))
+            return
+
+        if op.kind == "rename_column":
+            lama = str(payload.get("name") or "")
+            baru = str(payload.get("new_name") or "")
+            if not lama or not baru or lama == baru:
+                return
+            kolom_lama = f"{prefix}{lama}"
+            kolom_baru = f"{prefix}{baru}"
+            if kolom_lama not in self._df.columns:
+                raise ValueError(f"Kolom '{lama}' tidak ada")
+            if kolom_baru in self._df.columns:
+                raise ValueError(f"Kolom '{baru}' sudah ada")
+            self._df = self._df.rename(columns={kolom_lama: kolom_baru})
+            self._version += 1
+            return
+
+        if op.kind == "insert_column":
+            nama = str(payload.get("name") or "")
+            if not nama:
+                raise ValueError("insert_column butuh payload.name")
+            namespaced = f"{prefix}{nama}"
+            if namespaced in self._df.columns:
+                raise ValueError(f"kolom {nama!r} sudah ada di frame {frame_id[:12]}")
+            nilai = payload.get("values")
+            if nilai is None:
+                seri = pd.Series([None] * baris_kini, index=range(baris_kini), dtype=object)
+            else:
+                daftar = list(nilai)[:baris_kini]
+                seri = pd.Series(daftar, index=range(len(daftar)))
+            seri = seri.reindex(self._df.index)
+            self._df[namespaced] = seri
+            # Susun ulang urutan kolom agar posisi `at` dihormati.
+            at = payload.get("at")
+            if at is not None:
+                posisi = max(0, min(int(at), len(kolom_frame)))
+                urutan = list(self._df.columns)
+                urutan.remove(namespaced)
+                if posisi < len(kolom_frame):
+                    urutan.insert(urutan.index(kolom_frame[posisi]), namespaced)
+                else:
+                    indeks_akhir = urutan.index(kolom_frame[-1]) + 1 if kolom_frame else len(urutan)
+                    urutan.insert(indeks_akhir, namespaced)
+                self._df = self._df[urutan]
+            return
+
+        if op.kind == "delete_column":
+            nama = str(payload.get("name") or "")
+            namespaced = f"{prefix}{nama}"
+            if namespaced in self._df.columns:
+                self._df = self._df.drop(columns=[namespaced])
+            return
+
+        raise ValueError(f"jenis operasi struktural tidak dikenal: {op.kind}")
 
     def _ensure_row(self, row_idx: int) -> None:
         target_len = row_idx + 1
         if len(self._df.index) < target_len:
             self._df = self._df.reindex(range(target_len))
+
+    def _extent_frame(self, frame_id: str) -> int:
+        """Perkiraan jumlah baris frame dari kolom namespaced yang sudah ada.
+
+        Dipakai saat catatan baris frame belum ada (mis. frame hasil restore),
+        supaya pencatatan tidak justru memotong baris yang sudah ada.
+        """
+        prefix = f"{frame_id}::"
+        kolom = [c for c in self._df.columns if c.startswith(prefix)]
+        if not kolom:
+            return 0
+        terisi = self._df[kolom].notna().any(axis=1)
+        if not terisi.any():
+            return 0
+        return int(terisi[terisi].index[-1]) + 1
+
+    def _catat_baris(self, frame_id: str, baris: int) -> None:
+        """Catat jumlah baris MILIK satu frame. Lock harus sudah dipegang pemanggil."""
+        if not frame_id or baris <= 0:
+            return
+        lama = self._frame_rows.get(frame_id)
+        if lama is None:
+            # Belum ada catatan (mis. frame hasil restore): ambil luas baris yang
+            # sudah ada supaya pencatatan tidak memotong baris lama.
+            self._frame_rows[frame_id] = max(self._extent_frame(frame_id), baris)
+            return
+        if baris > lama:
+            self._frame_rows[frame_id] = baris
+
+    def _pastikan_row_ids(self, frame_id: str, jumlah: int) -> list[str]:
+        """Daftar id baris frame, dibangun deterministik bila belum ada.
+
+        Lock harus sudah dipegang pemanggil.
+        """
+        ids = self._frame_row_ids.setdefault(frame_id, [])
+        seq = self._frame_row_seq.get(frame_id, 0)
+        while len(ids) < jumlah:
+            ids.append(f"r{seq}")
+            seq += 1
+        self._frame_row_seq[frame_id] = max(seq, len(ids))
+        return ids
+
+    def _next_row_id(self, frame_id: str) -> str:
+        seq = self._frame_row_seq.get(frame_id, 0)
+        self._frame_row_seq[frame_id] = seq + 1
+        return f"r{seq}"
+
+    def restore_row_ids(self, frame_id: str, ids: list[str]) -> None:
+        """Pulihkan identitas baris yang tersimpan (dipakai saat frame dimuat).
+
+        Penghitung id dinaikkan melewati id yang ada supaya baris baru tidak
+        memakai identitas yang sudah terpakai.
+        """
+        bersih = [str(rid) for rid in ids if str(rid)]
+        if not bersih:
+            return
+        with self._lock:
+            self._frame_row_ids[frame_id] = list(bersih)
+            seq = 0
+            for rid in bersih:
+                if rid.startswith("r") and rid[1:].isdigit():
+                    seq = max(seq, int(rid[1:]) + 1)
+            self._frame_row_seq[frame_id] = max(seq, len(bersih))
+
+    def row_ids_range(self, frame_id: str, start: int = 0, end: int | None = None) -> list[str]:
+        """Potongan id baris tanpa menyalin seluruh daftar (untuk jendela baca)."""
+        with self._lock:
+            baris = self._frame_rows.get(frame_id)
+            if baris is None:
+                baris = self._extent_frame(frame_id)
+            ids = self._pastikan_row_ids(frame_id, baris)
+            return list(ids[max(0, start) : (len(ids) if end is None else max(0, end))])
+
+    def row_ids(self, frame_id: str) -> list[str]:
+        """Salinan daftar id baris frame (posisi ke-n = id baris ke-n)."""
+        with self._lock:
+            baris = self._frame_rows.get(frame_id)
+            if baris is None:
+                baris = self._extent_frame(frame_id)
+            return list(self._pastikan_row_ids(frame_id, baris))
 
     @staticmethod
     def _values_match(current_value: Any, expected_value: Any) -> bool:

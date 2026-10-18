@@ -46,7 +46,15 @@ _ALLOWED_TRANSITIONS: dict[TxState, set[TxState]] = {
 
 @dataclass(slots=True)
 class Operation:
-    """Single-cell mutation payload."""
+    """Mutasi pada frame: satu sel (default) atau satu perubahan struktural.
+
+    Fase 0 operasi struktural: perubahan bentuk (tambah/hapus baris, tambah/hapus
+    kolom) dicatat sebagai SATU operasi, bukan ribuan operasi sel. Contoh nyata:
+    menambah satu baris pada sheet 27 kolom sebelumnya menulis ~27 x jumlah baris
+    operasi sel; dengan kind "insert_rows" cukup satu operasi.
+
+    kind "set_cell" tetap default supaya entri WAL lama tetap terbaca.
+    """
 
     cell_id: str
     old_value: Any
@@ -54,10 +62,17 @@ class Operation:
     author_type: str
     author_id: str | None = None
     confidence: float | None = None
+    kind: str = "set_cell"
+    payload: dict[str, Any] | None = None
+
+    @property
+    def is_structural(self) -> bool:
+        """True bila operasi mengubah bentuk frame, bukan nilai satu sel."""
+        return self.kind != "set_cell"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize operation for WAL/JSON output."""
-        return {
+        data = {
             "cell_id": self.cell_id,
             "old_value": self.old_value,
             "new_value": self.new_value,
@@ -65,6 +80,12 @@ class Operation:
             "author_id": self.author_id,
             "confidence": self.confidence,
         }
+        # Hanya operasi struktural yang menambah kunci, supaya entri sel tetap
+        # persis seperti sebelumnya.
+        if self.is_structural:
+            data["kind"] = self.kind
+            data["payload"] = self.payload
+        return data
 
 
 @dataclass(slots=True)

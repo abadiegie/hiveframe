@@ -26,6 +26,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger("hiveframe.dataframe")
 
 
+def _kolom_object_ke_teks(df: pd.DataFrame) -> pd.DataFrame:
+    """Ubah kolom object menjadi teks nullable agar bisa dikonversi ke Arrow.
+
+    Jalur cadangan saat kolom berisi campuran angka dan teks, misalnya sel kosong
+    yang tersimpan sebagai string kosong pada kolom numerik. Pemakaian tipe
+    "string" (bukan str) menjaga nilai kosong tetap NA, bukan teks "nan".
+    """
+    hasil = df.copy()
+    for kolom in hasil.columns:
+        if hasil[kolom].dtype == object:
+            hasil[kolom] = hasil[kolom].astype("string")
+    return hasil
+
+
+def _snapshot_dict_ke_frame(snapshot: dict) -> pd.DataFrame:
+    """Susun DataFrame dari snapshot JSON, label indeks dikembalikan ke angka.
+
+    json_safe menyimpan DataFrame sebagai {kolom: {baris: nilai}}, dan JSON
+    mengubah kunci menjadi string. Tanpa konversi ini, penerapan delta akan
+    menambah baris baru alih-alih menimpa baris yang sudah ada.
+    """
+    frame = pd.DataFrame(snapshot)
+    try:
+        frame.index = [int(i) for i in frame.index]
+    except (TypeError, ValueError):
+        pass
+    return frame
+
+
 def _schema_sidecar_path(parquet_path: Path) -> Path:
     return parquet_path.with_suffix(parquet_path.suffix + ".schema.json")
 
@@ -424,6 +453,24 @@ class DFrame:
         except ValueError:
             return None
 
+    def _catat_baris_frame(self, baris: int) -> None:
+        """Catat jumlah baris MILIK frame ini di write node.
+
+        WriteNode memakai satu DataFrame global berisi kolom semua frame, jadi
+        tanpa catatan ini frame baru mewarisi jumlah baris frame terpanjang.
+        """
+        if baris <= 0:
+            return
+        wn = self._coordinator.write_node
+        with wn._lock:
+            wn._catat_baris(self._frame_id, baris)
+
+    def _potong_ke_baris_frame(self, frame: pd.DataFrame, jumlah: int | None) -> pd.DataFrame:
+        """Batasi snapshot ke jumlah baris milik frame ini (lihat _frame_rows)."""
+        if jumlah is not None and len(frame) > jumlah:
+            return frame.iloc[:jumlah]
+        return frame
+
     def _snapshot_for_frame(self, raw: pd.DataFrame) -> pd.DataFrame:
         """Vectorized - does not use nested loop + .at()"""
         wn = self._coordinator.write_node
@@ -440,6 +487,7 @@ class DFrame:
             result = df[matching].copy()
             result.columns = [c[len(prefix):].rsplit("_", 1)[0]
                               for c in matching]
+            result = self._potong_ke_baris_frame(result, wn._frame_rows.get(self._frame_id))
             return result.reset_index(drop=True)
 
     def _validate_value(self, col: str, value: Any) -> Any:
@@ -486,6 +534,8 @@ class DFrame:
                 wn._df = chunk_frame
             else:
                 wn._df = pd.concat([wn._df, chunk_frame])
+            akhir = row_offset + len(chunk_frame)
+            wn._catat_baris(self._frame_id, akhir)
             wn._version += 1
         return len(chunk_frame)
 
@@ -694,8 +744,12 @@ class DFrame:
         WAL only records a single summary entry for the entire seed.
         """
         max_len = max((len(v) for v in normalized_data.values()), default=0)
-        if max_len == 0:
+        # Dict kosong berarti tidak ada skema sama sekali. Tapi dict berisi kolom
+        # dengan daftar kosong tetap harus membuat kolomnya, supaya frame tanpa
+        # baris pun punya skema dan bisa diisi kemudian.
+        if max_len == 0 and not normalized_data:
             return
+        self._catat_baris_frame(max_len)
 
         # Build namespaced columns directly
         namespaced = {
@@ -739,6 +793,31 @@ class DFrame:
             summary_tx.transition(TxState.APPLYING)
             summary_tx.transition(TxState.COMMITTED)
             self._coordinator.wal.append(summary_tx)
+        self._invalidate_snapshot_cache()
+
+    def __delitem__(self, column: str) -> None:
+        """Hapus satu kolom dari frame ini.
+
+        Kolom namespaced dibuang dari write node dan skemanya (kalau ada)
+        dibersihkan. Operasi per sel tetap dicatat pemanggil lewat WAL, jadi di
+        sini sengaja tidak menambah entri WAL struktural supaya tidak ganda.
+        """
+        if not isinstance(column, str):
+            raise TypeError("column name must be a string")
+        prefix = f"{self._frame_id}::{column}"
+        wn = self._coordinator.write_node
+        with wn._lock:
+            namespaced = prefix if prefix in wn._df.columns else None
+            if namespaced is None:
+                # Kolom hasil impor bisa punya akhiran internal; terima pencocokan
+                # berawalan sama selama tidak ambigu.
+                kandidat = [c for c in wn._df.columns if c.startswith(prefix)]
+                if len(kandidat) != 1:
+                    raise KeyError(column)
+                namespaced = kandidat[0]
+            wn._df = wn._df.drop(columns=[namespaced])
+            wn._version += 1
+        self._schema.pop(column, None)
         self._invalidate_snapshot_cache()
 
     def __setitem__(self, column: str, value: Any) -> None:
@@ -788,7 +867,254 @@ class DFrame:
                 return owner.node_id
         return "local"
 
-    def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> None:
+    def submit_structural(
+        self,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        author_type: str = "human",
+        author_id: str | None = "user",
+    ) -> bool:
+        """Kirim satu operasi struktural (perubahan bentuk frame) ke WAL.
+
+        Mengembalikan True bila transaksi berakhir COMMITTED. Pemanggil seperti
+        tool agent perlu tahu kegagalan (mis. kolom tidak ada), karena sebelumnya
+        kegagalan tertelan tanpa jejak.
+
+        Berbeda dari __setitem__ yang membuat satu operasi per sel, satu operasi
+        struktural mewakili seluruh perubahan: menambah atau menghapus baris dan
+        kolom. Ini yang membuat WAL tetap kecil untuk perubahan bentuk.
+        """
+        isi = dict(payload or {})
+        isi.setdefault("frame_id", self._frame_id)
+        op = Operation(
+            cell_id=f"{self._frame_id}::__structure__",
+            old_value=isi.get("old_value"),
+            new_value=None,
+            author_type=author_type,
+            author_id=author_id,
+            kind=kind,
+            payload=isi,
+        )
+        self._invalidate_snapshot_cache()
+        node_id = "local" if self._runtime is None else self._get_owner_node_id(0)
+        berhasil = self._submit_routed({node_id: [op]})
+        if not berhasil:
+            logger.warning(
+                "Operasi struktural %s gagal frame=%s", kind, self._frame_id[:12]
+            )
+        return berhasil
+
+    def groupby_aggregate(
+        self,
+        group_cols: list[str],
+        value_cols: list[str],
+        how: str = "sum",
+        limit: int = 50,
+        *,
+        filter_col: str | None = None,
+        filter_value: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Agregasi kelompok tanpa memindahkan seluruh baris ke pemanggil.
+
+        Mode standalone: group-by langsung pada snapshot lokal (satu node).
+        Mode cluster: setiap potongan dibaca berurutan lewat jalur global lalu
+        digabung secara bertahap, sehingga hasilnya benar untuk data yang
+        terpartisi antar node tanpa memuat semuanya sekaligus.
+
+        Operasi yang didukung: sum, count, min, max, mean. Hasil dibatasi
+        `limit` baris teratas menurut kolom nilai pertama (menurun).
+        """
+        fungsi = str(how or "sum").strip().lower()
+        if fungsi not in {"sum", "count", "min", "max", "mean"}:
+            raise ValueError(f"Fungsi agregasi '{how}' tidak dikenal")
+        if not group_cols:
+            raise ValueError("group_cols wajib diisi")
+        if fungsi != "count" and not value_cols:
+            raise ValueError("value_cols wajib diisi untuk fungsi selain count")
+
+        segar = self.read_fresh()
+        for kolom in [*group_cols, *value_cols, *([filter_col] if filter_col else [])]:
+            if kolom not in segar.columns:
+                raise KeyError(kolom)
+
+        # Standalone: satu group-by lokal, tanpa streaming.
+        if self._runtime is None:
+            potongan = segar
+            if filter_col is not None:
+                potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
+            kunci = group_cols
+            if fungsi == "count":
+                hasil = potongan.groupby(kunci, dropna=False).size().reset_index(name="jumlah")
+            elif fungsi == "mean":
+                hasil = potongan.groupby(kunci, dropna=False)[value_cols].mean().reset_index()
+            else:
+                hasil = getattr(potongan.groupby(kunci, dropna=False)[value_cols], fungsi)().reset_index()
+            urut = value_cols[0] if value_cols else "jumlah"
+            if urut in hasil.columns:
+                hasil = hasil.sort_values(urut, ascending=False)
+            return hasil.head(max(1, limit)).to_dict(orient="records")
+
+        # Cluster: agregasi bertahap atas potongan global, lalu digabung.
+        # Bila dipanggil dari dalam event loop (mis. endpoint async), jalankan di
+        # thread terpisah karena read_fresh_global_lazy() menolak loop aktif.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._agregasi_cluster(group_cols, value_cols, fungsi, limit, filter_col, filter_value)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="agregasi") as eksekutor:
+            return eksekutor.submit(
+                self._agregasi_cluster, group_cols, value_cols, fungsi, limit, filter_col, filter_value
+            ).result()
+
+    def _agregasi_cluster(
+        self,
+        group_cols: list[str],
+        value_cols: list[str],
+        fungsi: str,
+        limit: int,
+        filter_col: str | None,
+        filter_value: Any,
+    ) -> list[dict[str, Any]]:
+        """Agregasi bertahap atas potongan global. Aman dipanggil di luar event loop."""
+        akumulasi: dict[tuple, dict[str, float]] = {}
+        jumlah_baris: dict[tuple, int] = {}
+        for potongan in self.read_fresh_global_lazy():
+            if filter_col is not None:
+                potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
+            if potongan.empty:
+                continue
+            for kunci, grup in potongan.groupby(group_cols, dropna=False):
+                kunci_tuple = kunci if isinstance(kunci, tuple) else (kunci,)
+                nilai = akumulasi.setdefault(kunci_tuple, {})
+                jumlah_baris[kunci_tuple] = jumlah_baris.get(kunci_tuple, 0) + len(grup)
+                for kolom in value_cols:
+                    seri = pd.to_numeric(grup[kolom], errors="coerce")
+                    if fungsi in {"sum", "mean"}:
+                        nilai[kolom] = nilai.get(kolom, 0.0) + float(seri.sum())
+                    elif fungsi == "min":
+                        nilai[kolom] = min(nilai.get(kolom, float("inf")), float(seri.min()))
+                    elif fungsi == "max":
+                        nilai[kolom] = max(nilai.get(kolom, float("-inf")), float(seri.max()))
+
+        hasil: list[dict[str, Any]] = []
+        for kunci_tuple, nilai in akumulasi.items():
+            baris: dict[str, Any] = dict(zip(group_cols, kunci_tuple))
+            if fungsi == "count":
+                baris["jumlah"] = jumlah_baris[kunci_tuple]
+            else:
+                for kolom in value_cols:
+                    total = nilai.get(kolom, 0.0)
+                    baris[kolom] = (
+                        total / jumlah_baris[kunci_tuple] if fungsi == "mean" and jumlah_baris[kunci_tuple] else total
+                    )
+            hasil.append(baris)
+        urut = value_cols[0] if value_cols else "jumlah"
+        if hasil and urut in hasil[0]:
+            hasil.sort(key=lambda r: r.get(urut) or 0, reverse=True)
+        return hasil[: max(1, limit)]
+
+    def row_ids(self) -> list[str]:
+        """Identitas stabil tiap baris, urut sesuai posisi saat ini.
+
+        Identitas dibangun deterministik untuk frame lama dan tetap sama saat
+        baris lain dihapus atau disisipkan.
+        """
+        return self._coordinator.write_node.row_ids(self._frame_id)
+
+    def restore_row_ids(self, ids: list[str]) -> None:
+        """Pulihkan identitas baris yang tersimpan, mis. setelah frame dimuat."""
+        self._coordinator.write_node.restore_row_ids(self._frame_id, ids)
+
+    def position_of_row(self, row_id: str) -> int | None:
+        """Posisi baris dengan identitas tertentu (None bila tidak ada)."""
+        ids = self.row_ids()
+        try:
+            return ids.index(str(row_id))
+        except ValueError:
+            return None
+
+    def row_ids_range(self, start: int = 0, end: int | None = None) -> list[str]:
+        """Id baris untuk rentang posisi tertentu (untuk jendela baca)."""
+        return self._coordinator.write_node.row_ids_range(self._frame_id, start, end)
+
+    def row_id_at(self, position: int) -> str | None:
+        """Identitas baris pada posisi tertentu (None bila di luar jangkauan)."""
+        ids = self.row_ids()
+        if 0 <= position < len(ids):
+            return ids[position]
+        return None
+
+    def insert_rows(
+        self,
+        count: int,
+        at: int | None = None,
+        default: Any = None,
+        row_ids: list[str] | None = None,
+    ) -> None:
+        """Sisipkan `count` baris pada posisi `at` (default: akhir frame).
+
+        `row_ids` opsional dipakai untuk mengembalikan identitas baris yang pernah
+        dihapus (mis. saat memulihkan baris).
+        """
+        payload: dict[str, Any] = {"count": int(count), "default": default}
+        if at is not None:
+            payload["at"] = int(at)
+        if row_ids:
+            payload["row_ids"] = [str(rid) for rid in row_ids]
+        return self.submit_structural("insert_rows", payload)
+
+    def append_rows(self, count: int, default: Any = None) -> None:
+        """Tambah `count` baris di akhir frame sebagai satu operasi struktural."""
+        return self.insert_rows(int(count), at=None, default=default)
+
+    def delete_rows(
+        self,
+        rows: list[int] | None = None,
+        row_ids: list[str] | None = None,
+    ) -> None:
+        """Hapus baris berdasarkan posisi, identitas, atau keduanya.
+
+        Operasi mencatat identitas baris yang terhapus (deleted_row_ids) di payload
+        supaya pemulihan tidak bergantung pada posisi yang bisa bergeser.
+        """
+        payload: dict[str, Any] = {}
+        if rows:
+            payload["rows"] = [int(r) for r in rows]
+        if row_ids:
+            payload["row_ids"] = [str(r) for r in row_ids]
+        if not payload:
+            return
+        return self.submit_structural("delete_rows", payload)
+
+    def rename_column(self, name: str, new_name: str) -> None:
+        """Ganti nama kolom sebagai satu operasi struktural."""
+        return self.submit_structural("rename_column", {"name": name, "new_name": new_name})
+        # Skema per kolom (bila ada) ikut pindah nama.
+        skema = getattr(self, "_schema", None)
+        if isinstance(skema, dict) and name in skema:
+            skema[new_name] = skema.pop(name)
+
+    def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> None:
+        """Tambah kolom pada posisi `at` sebagai satu operasi struktural."""
+        return self.submit_structural("insert_column", {"name": name, "values": values, "at": at})
+
+    def drop_column(self, name: str, values: list[Any] | None = None) -> None:
+        """Hapus kolom lewat WAL sebagai satu operasi struktural.
+
+        `values` boleh diisi nilai lama kolom supaya pemulihan (restore) bisa
+        dilakukan tanpa perlu op per sel.
+        """
+        self._schema.pop(name, None)
+        payload: dict[str, Any] = {"name": name}
+        if values is not None:
+            payload["values"] = list(values)
+        return self.submit_structural("delete_column", payload)
+
+    def _submit_routed(self, node_ops: "dict[str, list[Operation]]") -> bool:
         """Submit operation groups to the correct coordinator per owning node."""
         # Capability gate: check if this node can accept writes.
         # Only enforced when cluster is enabled — prevents silent corruption.
@@ -802,16 +1128,23 @@ class DFrame:
                     "This node is read-only or draining. Route writes to an 'rw' node."
                 )
 
+        berhasil = True
         for node_id, ops in node_ops.items():
             if not ops:
                 continue
             coordinator = self._resolve_coordinator(node_id)
             if self._transactional:
-                coordinator.submit(ops)
+                tx = coordinator.submit(ops)
+                status = getattr(getattr(tx, "state", None), "name", str(getattr(tx, "state", "")))
+                # Sukses bisa berakhir COMMITTED, SYNCING, atau SYNCED tergantung
+                # konfigurasi sinkronisasi; yang gagal hanya FAILED/ROLLED_BACK.
+                if status not in {"COMMITTED", "SYNCING", "SYNCED"}:
+                    berhasil = False
             else:
                 ok = coordinator.submit_non_transactional(ops)
                 if not ok:
                     raise RuntimeError(f"Non-transactional write failed on node '{node_id}'")
+        return berhasil
 
     def _resolve_coordinator(self, node_id: str) -> "TransactionCoordinator":
         """Resolve coordinator for a given node_id.
@@ -872,9 +1205,10 @@ class DFrame:
             if not matching_cols:
                 return pd.DataFrame()
             subset = df_internal[matching_cols].copy()
+            jumlah_baris = wn._frame_rows.get(self._frame_id)
         # Rename columns by stripping the namespace prefix
         subset.columns = [c[len(prefix):] for c in subset.columns]
-        return subset.reset_index(drop=True)
+        return self._potong_ke_baris_frame(subset, jumlah_baris).reset_index(drop=True)
 
     def _get_cached_snapshot(self) -> pd.DataFrame:
         """Return cached snapshot if write_node hasn't changed; otherwise rebuild."""
@@ -993,37 +1327,110 @@ class DFrame:
         for start in range(0, total_rows, chunk_size):
             yield df.iloc[start:start + chunk_size].copy()
 
-    def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000):
-        """Yield DataFrame chunks lazily from the local write-node snapshot.
-
-        If a persisted parquet exists, stream from disk (truly lazy). Otherwise,
-        fallback to in-memory chunking from the writer snapshot.
-        """
-        parquet_path = None
-        if self._coordinator and hasattr(self._coordinator, 'read_node'):
-            storage_dir = getattr(self._coordinator.read_node, '_storage_dir', None)
+    def _parquet_frame(self) -> Path | None:
+        """Path parquet frame ini di read node, kalau ada."""
+        if self._coordinator and hasattr(self, "_coordinator") and hasattr(self._coordinator, "read_node"):
+            storage_dir = getattr(self._coordinator.read_node, "_storage_dir", None)
             if storage_dir is not None:
-                parquet_path = Path(storage_dir) / f"{self._frame_id}.parquet"
-        if parquet_path and parquet_path.exists():
-            # Truly lazy: stream from parquet
+                path = Path(storage_dir) / f"{self._frame_id}.parquet"
+                if path.exists():
+                    return path
+        return None
+
+    def row_count(self) -> int:
+        """Jumlah baris frame tanpa harus mematerialisasi datanya.
+
+        Urutan sumber: catatan baris write node (paling murah), metadata parquet,
+        lalu snapshot memori sebagai jalan terakhir.
+        """
+        wn = getattr(self._coordinator, "write_node", None)
+        if wn is not None:
+            with wn._lock:
+                jumlah = wn._frame_rows.get(self._frame_id)
+            if jumlah is not None:
+                return int(jumlah)
+        path = self._parquet_frame()
+        if path is not None:
             try:
-                import pyarrow
                 import pyarrow.parquet as pq
-                table = pq.read_table(parquet_path, columns=columns)
-                df = table.to_pandas()
-                total_rows = len(df)
-                for start in range(0, total_rows, chunk_size):
-                    yield df.iloc[start : start + chunk_size].copy()
+                return int(pq.ParquetFile(path).metadata.num_rows)
+            except Exception:
+                pass
+        return len(self)
+
+    def iter_record_batches(self, columns: list[str] | None = None, batch_size: int = 1000, start_row: int = 0):
+        """Yield pyarrow RecordBatch bertahap, langsung dari parquet bila ada.
+
+        Bedanya dengan membaca sekaligus: row group yang seluruhnya berada sebelum
+        start_row dilewati, sehingga jendela di tengah frame besar tidak menyeret
+        seluruh frame ke memori.
+        """
+        import pyarrow as pa
+
+        path = self._parquet_frame()
+        if path is not None:
+            try:
+                import pyarrow.parquet as pq
+                berkas = pq.ParquetFile(path)
+                jumlah_grup = berkas.metadata.num_row_groups
+                grup_awal = jumlah_grup
+                dilewati = 0
+                for i in range(jumlah_grup):
+                    baris_grup = berkas.metadata.row_group(i).num_rows
+                    if dilewati + baris_grup <= start_row:
+                        dilewati += baris_grup
+                        continue
+                    grup_awal = i
+                    break
+                if grup_awal >= jumlah_grup:
+                    return
+                sisa_awal = max(0, start_row - dilewati)
+                for batch in berkas.iter_batches(
+                    batch_size=batch_size,
+                    columns=columns,
+                    row_groups=list(range(grup_awal, jumlah_grup)),
+                ):
+                    if sisa_awal:
+                        if batch.num_rows <= sisa_awal:
+                            sisa_awal -= batch.num_rows
+                            continue
+                        batch = batch.slice(sisa_awal)
+                        sisa_awal = 0
+                    if batch.num_rows:
+                        yield batch
                 return
             except Exception:
-                pass  # fallback to in-memory
-        # Fallback: in-memory chunking
+                pass  # fallback ke snapshot memori
         df = self.read_fresh()
         if columns is not None:
             df = df[columns]
-        total_rows = len(df)
-        for start in range(0, total_rows, chunk_size):
-            yield df.iloc[start : start + chunk_size].copy()
+        if start_row:
+            df = df.iloc[start_row:]
+        for start in range(0, len(df), batch_size):
+            potongan = df.iloc[start : start + batch_size]
+            try:
+                yield pa.RecordBatch.from_pandas(potongan, preserve_index=False)
+            except pa.ArrowInvalid:
+                # Kolom object bercampur (mis. angka dan teks kosong dari data
+                # lama) tidak bisa dikonversi langsung. Kolom seperti itu diubah
+                # ke teks supaya pembacaan tetap jalan daripada gagal total.
+                yield pa.RecordBatch.from_pandas(_kolom_object_ke_teks(potongan), preserve_index=False)
+
+    def read_fresh_lazy(self, columns: list[str] | None = None, chunk_size: int = 1000, start_row: int = 0):
+        """Yield DataFrame chunks lazily dengan indeks baris global dipertahankan.
+
+        Kalau parquet ada, batch dibaca bertahap dari disk; kalau tidak, fallback
+        ke snapshot memori. Indeks tiap chunk di-set ke posisi baris global supaya
+        pemanggil lama yang memakai indeks sebagai __row_index__ tetap benar.
+        """
+        offset = max(0, start_row)
+        for batch in self.iter_record_batches(columns=columns, batch_size=chunk_size, start_row=start_row):
+            df = batch.to_pandas()
+            if columns is not None:
+                df = df[[c for c in columns if c in df.columns]]
+            df.index = range(offset, offset + len(df))
+            offset += len(df)
+            yield df
 
     # Backward-compatible alias for local lazy read
     read_lazy = read_fresh_lazy
@@ -1168,10 +1575,23 @@ class DFrame:
                 return False
         return True
 
-    def checkpoint(self, label: str | None = None) -> str:
+    # Fase 2: checkpoint disimpan sebagai delta terhadap checkpoint sebelumnya.
+    # Salinan penuh dibuat untuk checkpoint pertama, setiap kelipatan interval ini,
+    # atau bila rentangnya memuat perubahan bentuk frame / terlalu banyak op.
+    _CHECKPOINT_FULL_INTERVAL = 50
+    # Batas checkpoint otomatis yang disimpan; selebihnya dipangkas otomatis.
+    _CHECKPOINT_AUTO_MAX = 30
+    _CHECKPOINT_DELTA_MAX_OPS = 5000
+
+    def checkpoint(self, label: str | None = None, *, auto: bool = False) -> str:
         """
         Save the current state as a checkpoint.
         Returns a checkpoint_id that can be used for rollback.
+
+        Fase 2: checkpoint hanya menyalin seluruh frame kalau memang perlu. Sisanya
+        disimpan sebagai delta berupa operasi WAL sejak checkpoint induk, sehingga
+        biaya penyimpanan turun dari O(checkpoint x frame) menjadi O(frame +
+        perubahan).
         """
         if not self._transactional:
             raise RuntimeError("checkpoint() is unavailable when transactional=False")
@@ -1180,16 +1600,135 @@ class DFrame:
             self._checkpoints = {}
         checkpoint_id = label or f"cp_{int(time.time())}"
         current_lsn = self._coordinator.wal._next_lsn - 1
-        # Store a DataFrame reference instead of a dict-of-lists.
-        # _get_cached_snapshot() returns the cached frame (already a copy from
-        # _build_local_snapshot); no further copy is needed here because future
-        # writes replace the cache object rather than mutating it.
-        self._checkpoints[checkpoint_id] = {
-            "lsn": current_lsn,
-            "snapshot_df": self._get_cached_snapshot(),
-            "created_at": time.time(),
-        }
+        induk = next(reversed(self._checkpoints), None)
+        entri = self._bangun_entri_checkpoint(checkpoint_id, induk, current_lsn, time.time())
+        # Fase 3: setiap checkpoint adalah sebuah commit pada rantai berparent.
+        entri["commit_id"] = checkpoint_id
+        entri["parent_commit"] = induk
+        entri["auto"] = bool(auto)
+        self._checkpoints[checkpoint_id] = entri
+        if auto:
+            jumlah_auto = sum(1 for e in self._checkpoints.values() if e.get("auto"))
+            if jumlah_auto > self._CHECKPOINT_AUTO_MAX:
+                self.prune_checkpoints(keep_last=self._CHECKPOINT_AUTO_MAX, keep_named=True)
         return checkpoint_id
+
+    def _bangun_entri_checkpoint(
+        self, checkpoint_id: str, induk: str | None, lsn: int, dibuat: float
+    ) -> dict[str, Any]:
+        """Tentukan bentuk entri checkpoint: salinan penuh atau delta."""
+        dasar: dict[str, Any] = {"lsn": lsn, "created_at": dibuat}
+        jumlah = len(self._checkpoints)
+        perlu_penuh = induk is None or jumlah % self._CHECKPOINT_FULL_INTERVAL == 0
+        if perlu_penuh:
+            return {**dasar, "kind": "full", "snapshot_df": self._get_cached_snapshot()}
+
+        entri_induk = self._checkpoints.get(induk) or {}
+        ops = self._ops_sejak(int(entri_induk.get("lsn", 0)))
+        if ops is None:
+            # Delta tidak layak (ada perubahan bentuk atau terlalu banyak op).
+            return {**dasar, "kind": "full", "snapshot_df": self._get_cached_snapshot()}
+        return {**dasar, "kind": "delta", "parent": induk, "ops": ops}
+
+    def _ops_sejak(self, lsn: int) -> list[dict[str, Any]] | None:
+        """Operasi committed setelah lsn, atau None bila delta tidak layak.
+
+        Perubahan bentuk frame mengubah jumlah baris/kolom, sehingga delta berbasis
+        sel tidak cukup untuk menyusunnya kembali; checkpoint seperti itu dibuat
+        penuh.
+        """
+        try:
+            entries = self._coordinator.wal.get_since(lsn)
+        except Exception as exc:  # pragma: no cover - WAL tanpa get_since
+            logger.warning("Checkpoint delta tidak bisa membaca WAL: %s", exc)
+            return None
+        # Celah kompaksi: bila entri setelah lsn sudah dipangkas, delta tidak bisa
+        # dipercaya. Lebih baik menyimpan checkpoint penuh daripada delta bolong
+        # yang membuat pemulihan diam-diam salah.
+        daftar_lsn = [int(e.get("lsn", 0)) for e in entries if str(e.get("state", "")).lower() == "committed"]
+        next_lsn = int(getattr(self._coordinator.wal, "_next_lsn", 0) or 0)
+        if next_lsn > lsn + 1:
+            if not daftar_lsn or min(daftar_lsn) > lsn + 1:
+                logger.info(
+                    "Checkpoint delta dilewati frame=%s lsn=%s: entri WAL sudah dipangkas",
+                    self._frame_id[:12], lsn,
+                )
+                return None
+
+        ops: list[dict[str, Any]] = []
+        for entry in entries:
+            if str(entry.get("state", "")).lower() != "committed":
+                continue
+            for op in entry.get("operations", []):
+                if op.get("kind", "set_cell") != "set_cell":
+                    return None
+                ops.append(op)
+                if len(ops) > self._CHECKPOINT_DELTA_MAX_OPS:
+                    return None
+        return ops
+
+    def checkpoint_snapshot(self, checkpoint_id: str) -> pd.DataFrame:
+        """Susun keadaan sheet pada sebuah checkpoint.
+
+        Delta dirangkai ke induknya sampai menemukan checkpoint penuh. Pemakaian
+        utama: diff, rollback, dan pemulihan hivesheet.
+        """
+        return self._materialisasi_checkpoint(checkpoint_id, set())
+
+    def _materialisasi_checkpoint(self, checkpoint_id: str, dikunjungi: set[str]) -> pd.DataFrame:
+        if checkpoint_id in dikunjungi:
+            raise KeyError(f"Rantai checkpoint melingkar pada '{checkpoint_id}'")
+        dikunjungi.add(checkpoint_id)
+        entri = self._checkpoint_entri(checkpoint_id)
+        snapshot = entri.get("snapshot_df")
+        if snapshot is not None:
+            # Checkpoint yang dimuat dari Redis/sidecar berbentuk dict, bukan
+            # DataFrame. Label indeksnya juga kembali sebagai string ("0"), jadi
+            # harus dikembalikan ke angka: tanpa itu penerapan delta akan
+            # menambah baris baru alih-alih menimpa baris yang ada.
+            if isinstance(snapshot, dict):
+                snapshot = _snapshot_dict_ke_frame(snapshot)
+            # Salinan supaya pemanggil tidak bisa mengubah entri checkpoint.
+            return snapshot.copy(deep=True)
+        induk = entri.get("parent")
+        if not induk:
+            raise KeyError(f"Checkpoint '{checkpoint_id}' tidak punya snapshot maupun induk")
+        dasar = self._materialisasi_checkpoint(str(induk), dikunjungi)
+        return self._terapkan_ops_ke_snapshot(dasar, entri.get("ops") or [])
+
+    def _checkpoint_entri(self, checkpoint_id: str) -> dict[str, Any]:
+        if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
+            raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
+        entri = self._checkpoints[checkpoint_id]
+        if not isinstance(entri, dict):
+            raise KeyError(f"Checkpoint '{checkpoint_id}' tidak valid")
+        return entri
+
+    def _terapkan_ops_ke_snapshot(
+        self, dasar: pd.DataFrame, ops: list[dict[str, Any]]
+    ) -> pd.DataFrame:
+        """Terapkan op sel dari WAL ke salinan snapshot."""
+        hasil = dasar.copy(deep=True)
+        prefix = f"{self._frame_id}::{''}"
+        for op in ops:
+            cell_id = str(op.get("cell_id") or "")
+            if not cell_id.startswith(prefix):
+                continue
+            sisa = cell_id[len(prefix):]
+            if "_" not in sisa:
+                continue
+            kolom, baris = sisa.rsplit("_", 1)
+            if not baris.isdigit() or kolom not in hasil.columns:
+                continue
+            idx = int(baris)
+            if idx >= len(hasil):
+                hasil = hasil.reindex(range(idx + 1))
+            hasil.at[idx, kolom] = op.get("new_value")
+        return hasil
+
+    def _checkpoint_lama(self, checkpoint_id: str) -> pd.DataFrame:
+        """Nama lama untuk snapshot checkpoint (dipakai pemanggil lama)."""
+        return self.checkpoint_snapshot(checkpoint_id)
 
     def rollback(self, checkpoint_id: str) -> None:
         """
@@ -1200,7 +1739,9 @@ class DFrame:
             raise RuntimeError("rollback() is unavailable when transactional=False")
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
-        snapshot_df: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
+        # Delta dirangkai ke basisnya supaya rollback tetap bekerja untuk checkpoint
+        # yang tidak menyimpan salinan penuh.
+        snapshot_df: pd.DataFrame = self.checkpoint_snapshot(checkpoint_id)
 
         # Clear all existing columns for this frame namespace before restoring
         prefix = f"{self._frame_id}{self._SEP}"
@@ -1214,11 +1755,102 @@ class DFrame:
         self._invalidate_snapshot_cache()
         self._seed_initial_data(snapshot_df.to_dict(orient="list"))
 
+    def head_commit(self) -> str | None:
+        """Commit terbaru (HEAD) pada rantai checkpoint."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        return next(reversed(kumpulan), None)
+
+    def resolve_ref(self, name: str) -> str | None:
+        """Selesaikan ref menjadi commit id: HEAD, nama checkpoint, atau commit id."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        if not kumpulan:
+            return None
+        if str(name).strip().upper() == "HEAD":
+            return self.head_commit()
+        if name in kumpulan:
+            return name
+        for cid, entri in kumpulan.items():
+            if entri.get("commit_id") == name:
+                return cid
+        return None
+
+    def list_commits(self) -> list[dict[str, Any]]:
+        """Riwayat commit pada rantai, urut dari terlama ke terbaru."""
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        return [
+            {
+                "commit_id": str(entri.get("commit_id") or cid),
+                "parent_commit": entri.get("parent_commit"),
+                "lsn": entri.get("lsn"),
+                "created_at": entri.get("created_at"),
+                "auto": bool(entri.get("auto")),
+                "kind": entri.get("kind", "full"),
+            }
+            for cid, entri in kumpulan.items()
+        ]
+
+    def prune_checkpoints(self, keep_last: int = 20, keep_named: bool = True) -> int:
+        """Buang checkpoint lama (gc), pertahankan N terakhir dan checkpoint manual.
+
+        Rantai harus tetap utuh: seluruh baris sejak checkpoint tertua yang
+        dipertahankan ikut disimpan, dan checkpoint manual yang lebih tua
+        dimekarkan menjadi snapshot penuh (rebase) supaya tidak lagi bergantung
+        pada basis yang dibuang. Mengembalikan jumlah entri yang dibuang.
+        """
+        kumpulan = getattr(self, "_checkpoints", None) or {}
+        if len(kumpulan) <= keep_last:
+            return 0
+        urutan = list(kumpulan)
+        batas = max(0, len(urutan) - max(0, keep_last))
+        dipertahankan = urutan[batas:]
+        # Checkpoint manual yang lebih tua tetap disimpan, tetapi harus mandiri.
+        if keep_named:
+            for cid in urutan[:batas]:
+                if not (kumpulan.get(cid) or {}).get("auto"):
+                    self._rebase_checkpoint(cid)
+                    dipertahankan = [cid] + dipertahankan
+        # Elemen tertua yang dipertahankan harus mandiri: bila masih delta, ia
+        # menunjuk induk yang ikut dibuang, sehingga rantai akan terputus.
+        if dipertahankan:
+            self._rebase_checkpoint(dipertahankan[0])
+        dibuang = [cid for cid in urutan if cid not in set(dipertahankan)]
+        for cid in dibuang:
+            kumpulan.pop(cid, None)
+        if dibuang:
+            logger.info(
+                "Prune checkpoint frame=%s dibuang=%d dipertahankan=%d",
+                self._frame_id[:12], len(dibuang), len(dipertahankan),
+            )
+        return len(dibuang)
+
+    def _rebase_checkpoint(self, checkpoint_id: str) -> None:
+        """Ubah checkpoint delta menjadi penuh agar tidak bergantung pada induknya."""
+        entri = self._checkpoints.get(checkpoint_id)
+        if not isinstance(entri, dict) or entri.get("kind") != "delta":
+            return
+        try:
+            snapshot = self.checkpoint_snapshot(checkpoint_id)
+        except Exception as exc:  # pragma: no cover - data checkpoint rusak
+            logger.warning("Rebase checkpoint %s gagal: %s", checkpoint_id, exc)
+            return
+        entri["kind"] = "full"
+        entri["snapshot_df"] = snapshot
+        entri["parent"] = None
+        entri["ops"] = []
+
     def list_checkpoints(self) -> list[dict]:
         if not hasattr(self, '_checkpoints'):
             return []
         return [
-            {"id": k, "lsn": v["lsn"], "created_at": v["created_at"]}
+            {
+                "id": k,
+                "lsn": v.get("lsn"),
+                "created_at": v.get("created_at"),
+                "commit_id": v.get("commit_id", k),
+                "parent_commit": v.get("parent_commit"),
+                "auto": bool(v.get("auto")),
+                "kind": v.get("kind", "full"),
+            }
             for k, v in self._checkpoints.items()
         ]
 
@@ -1227,20 +1859,33 @@ class DFrame:
         if not hasattr(self, '_checkpoints') or checkpoint_id not in self._checkpoints:
             raise KeyError(f"Checkpoint '{checkpoint_id}' not found")
         import pandas as pd
-        old: pd.DataFrame = self._checkpoints[checkpoint_id]["snapshot_df"]
+        old: pd.DataFrame = self.checkpoint_snapshot(checkpoint_id)
         new = self.read_fresh()
-        # Find changed cells
-        diff = (old != new).stack()
-        changed = diff[diff]
+        # Samakan kolom dan baris lebih dulu: checkpoint lama bisa punya bentuk
+        # berbeda (kolom/baris bertambah atau hilang).
+        old, new = old.align(new, join="outer", axis=1)
+        old, new = old.align(new, join="outer", axis=0)
+        # Sel yang dua-duanya kosong bukan perubahan.
+        berbeda = (old != new) & ~(old.isna() & new.isna())
+        changed = berbeda.stack()
+        changed = changed[changed]
         if changed.empty:
             return pd.DataFrame(columns=["row", "col", "old_value", "new_value"])
-        rows, cols = zip(*changed.index)
-        return pd.DataFrame({
-            "row": rows,
-            "col": cols,
-            "old_value": old.values[changed.index],
-            "new_value": new.values[changed.index],
-        })
+        records = []
+        for baris, kolom in changed.index:
+            try:
+                nomor_baris: Any = int(baris)
+            except (TypeError, ValueError):  # label baris non-angka
+                nomor_baris = baris
+            records.append(
+                {
+                    "row": nomor_baris,
+                    "col": kolom,
+                    "old_value": old.at[baris, kolom],
+                    "new_value": new.at[baris, kolom],
+                }
+            )
+        return pd.DataFrame(records)
 
     def cell_history(self, col: str, row_idx: int) -> list[dict]:
         if not self._transactional:

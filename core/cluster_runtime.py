@@ -86,6 +86,25 @@ class RuntimeConfig:
     audit_log_backup_count: int = 3
 
 
+def _host_untuk_diadvertise(host: str) -> str:
+    """Alamat yang didaftarkan ke registry harus bisa dihubungi peer.
+
+    0.0.0.0 dan :: adalah alamat bind, bukan alamat tujuan. Kalau itu yang
+    didaftarkan, heartbeat antar node gagal, status tidak pernah healthy, dan
+    partisi tidak pernah terbentuk. Untuk cluster lintas mesin, isi CLUSTER_HOST
+    dengan alamat LAN mesin ini.
+    """
+    bersih = (host or "").strip()
+    if bersih in {"", "0.0.0.0", "::", "[::]"}:
+        logger.warning(
+            "CLUSTER_HOST=%r tidak bisa dihubungi peer; mendaftarkan 127.0.0.1. "
+            "Untuk cluster lintas mesin, isi CLUSTER_HOST dengan alamat LAN.",
+            host,
+        )
+        return "127.0.0.1"
+    return bersih
+
+
 def _resolve_partition_weight(configured: float | None) -> float:
     """Return partition weight for this node.
 
@@ -338,7 +357,7 @@ class ClusterRuntime:
         # Register this node in the registry and log the registration
         node_info = self._NodeInfo(
             node_id=self.config.node_id,
-            host=self.config.host,
+            host=_host_untuk_diadvertise(self.config.host),
             port=self.config.port,
             role=self.config.role,
             region=self.config.region,
