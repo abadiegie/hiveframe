@@ -27,6 +27,7 @@ _SEND_MAX_RETRIES = 3
 _SEND_BASE_BACKOFF_MS = 200
 _SEND_MAX_BACKOFF_MS = 10_000
 _SEND_JITTER = True
+_MAX_FRAME_BYTES = 8 * 1024 * 1024
 
 
 class InMemoryTCPTransport:
@@ -417,6 +418,8 @@ class TCPTransport:
             while True:
                 header = await reader.readexactly(4)
                 size = int.from_bytes(header, "big")
+                if size <= 0 or size > _MAX_FRAME_BYTES:
+                    raise ValueError(f"Invalid TCP frame size: {size}")
                 payload = await reader.readexactly(size)
                 message = Message.deserialize(payload)
                 self._track_sender(message)
@@ -535,6 +538,8 @@ class TCPTransport:
             while True:
                 header = await reader.readexactly(4)
                 size = int.from_bytes(header, "big")
+                if size <= 0 or size > _MAX_FRAME_BYTES:
+                    raise ValueError(f"Invalid TCP frame size: {size}")
                 payload = await reader.readexactly(size)
                 message = Message.deserialize(payload)
                 self._track_sender(message)

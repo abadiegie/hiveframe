@@ -77,11 +77,42 @@ def _write_schema_sidecar(parquet_path: Path, schema: dict[str, ColumnSchema]) -
     sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _safe_dataset_path(name_or_path: str, storage_dir: str | Path, *, add_suffix: bool = False) -> Path:
+    """Resolve a dataset name inside the configured storage directory.
+
+    Absolute paths, ``..`` segments, and separators are rejected so a caller
+    cannot read or write outside Hiveframe's data directory.
+    """
+    raw = str(name_or_path or "").strip()
+    if not raw or "\x00" in raw:
+        raise ValueError("dataset name is empty")
+    root = Path(storage_dir).resolve()
+    if add_suffix:
+        if "/" in raw or "\\" in raw or raw in {".", ".."} or Path(raw).is_absolute():
+            raise ValueError("dataset name must not contain a path")
+        candidate = root / f"{raw}.parquet"
+    else:
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            # Explicit parquet paths are supported for library callers, but the
+            # path may not point at arbitrary non-parquet files.
+            if candidate.suffix.lower() != ".parquet" or not candidate.is_file():
+                raise ValueError("dataset path must be an existing parquet file")
+            return candidate.resolve()
+        if ".." in candidate.parts:
+            raise ValueError("dataset path must not contain '..'")
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("dataset path is outside the storage directory")
+    return resolved
+
+
 def _resolve_read_path(name_or_path: str, coordinator: TransactionCoordinator) -> Path:
-    candidate = Path(name_or_path)
+    candidate = _safe_dataset_path(name_or_path, coordinator.read_node._storage_dir)
     if candidate.suffix == ".parquet" or candidate.exists():
         return candidate
-    return Path(coordinator.read_node._storage_dir) / f"{candidate}.parquet"
+    return _safe_dataset_path(name_or_path, coordinator.read_node._storage_dir, add_suffix=True)
 
 
 class _RuntimeRegistry:
@@ -1546,7 +1577,7 @@ class DFrame:
         if not self._is_cache_complete_for(cached, set(frame.columns)):
             for col in frame.columns:
                 self[col] = frame[col].tolist()
-        path = Path(self._coordinator.read_node._storage_dir) / f"{name}.parquet"
+        path = _safe_dataset_path(name, self._coordinator.read_node._storage_dir, add_suffix=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_parquet(path)
         _write_schema_sidecar(path, self._schema)

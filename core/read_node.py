@@ -132,7 +132,9 @@ class ReadNode:
         The MinIO upload happens *outside* the lock to avoid blocking reads
         during a network round-trip.
         """
-        path = self._storage_dir / f"{name}.parquet"
+        from .dataframe import _safe_dataset_path
+
+        path = _safe_dataset_path(name, self._storage_dir, add_suffix=True)
         with self._lock:
             self._cache.to_parquet(path)
         # Upload to MinIO (source of truth) outside the lock
@@ -152,7 +154,9 @@ class ReadNode:
         is downloaded from MinIO first. Set *force_remote* to True to always
         pull from MinIO (overwriting any local copy).
         """
-        path = self._storage_dir / f"{name}.parquet"
+        from .dataframe import _safe_dataset_path
+
+        path = _safe_dataset_path(name, self._storage_dir, add_suffix=True)
 
         if self._minio is not None:
             object_name = f"parquet/{self._node_id}/{name}.parquet"
