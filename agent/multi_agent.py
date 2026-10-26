@@ -414,6 +414,7 @@ class QueryExecutor:
                         for marker in (
                             "Forbidden pattern",
                             "Method '",
+                            "method/atribut tidak diizinkan",
                             "Query must start with 'df'",
                             "Code block must assign final output to 'result'",
                         )
@@ -1167,27 +1168,12 @@ class MultiFrameAgent:
                 f"Query must start with 'df' or assign to 'result'. Got: {query_stripped[:50]}"
             )
 
-        for method in re.findall(r"\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", query_stripped):
-            if method not in _ALLOWED_PANDAS_METHODS:
-                raise ValueError(f"Method '{method}' is not allowed")
+        from .safe_eval import SafeEvalError, evaluate as safe_evaluate
 
-        local_ns: dict[str, Any] = {"df": df, "pd": pd}
-
-        if "\n" in query_stripped or has_result_assignment:
-            exec(  # noqa: S102
-                f"{query_stripped}\n__hf_final_result__ = result",
-                {"__builtins__": {}},
-                local_ns,
-            )
-            if "__hf_final_result__" not in local_ns:
-                raise ValueError("Code block must assign final output to 'result'")
-            result = local_ns["__hf_final_result__"]
-        else:
-            result = eval(  # noqa: S307
-                query_stripped,
-                {"__builtins__": {}},
-                local_ns,
-            )
+        try:
+            result = safe_evaluate(query_stripped, df)
+        except SafeEvalError as exc:
+            raise ValueError(str(exc)) from exc
 
         if not isinstance(result, (pd.DataFrame, pd.Series)):
             raise ValueError(f"Query must return DataFrame or Series, got {type(result).__name__}")
