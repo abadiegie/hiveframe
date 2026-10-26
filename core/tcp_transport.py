@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from threading import Event, Thread
 from typing import Awaitable, Callable
@@ -56,6 +57,7 @@ class InMemoryTCPTransport:
         self._pending: dict[str, asyncio.Future[Message]] = {}
         self._connected_nodes: set[str] = set()
         self._running = False
+        self._auth_secret: str = os.environ.get("HIVEFRAME_CLUSTER_SECRET", "")
 
     def register_peer(self, node_id: str, host: str, port: int) -> None:
         self.__class__._address_registry[(host, port)] = node_id
@@ -69,6 +71,10 @@ class InMemoryTCPTransport:
         logger.info("InMemoryTCPTransport listening on %s:%s as node_id=%s", self.host, self.port, self.node_id)
 
     async def listen(self, host: str, port: int) -> None:
+        if host not in {"127.0.0.1", "::1", "localhost"} and not self._auth_secret:
+            raise RuntimeError(
+                "HIVEFRAME_CLUSTER_SECRET is required when the cluster binds a non-loopback address"
+            )
         self._activate_listener(host, port)
 
     async def connect(self, host: str, port: int) -> object:
@@ -310,7 +316,7 @@ class TCPTransport:
                 payload={"host": self.host, "port": self.port},
             )
         )
-        encoded = join.serialize()
+        encoded = join.serialize(self._auth_secret)
         writer.write(len(encoded).to_bytes(4, "big") + encoded)
         await writer.drain()
         writer.close()
@@ -352,7 +358,7 @@ class TCPTransport:
             return
 
         outbound = self._with_sender_hint(message)
-        data = outbound.serialize()
+        data = outbound.serialize(self._auth_secret)
         packet = len(data).to_bytes(4, "big") + data
 
         host, port = target
@@ -421,7 +427,7 @@ class TCPTransport:
                 if size <= 0 or size > _MAX_FRAME_BYTES:
                     raise ValueError(f"Invalid TCP frame size: {size}")
                 payload = await reader.readexactly(size)
-                message = Message.deserialize(payload)
+                message = Message.deserialize(payload, self._auth_secret)
                 self._track_sender(message)
                 request_id = message.payload.get("request_id")
                 if request_id is not None:
@@ -541,7 +547,7 @@ class TCPTransport:
                 if size <= 0 or size > _MAX_FRAME_BYTES:
                     raise ValueError(f"Invalid TCP frame size: {size}")
                 payload = await reader.readexactly(size)
-                message = Message.deserialize(payload)
+                message = Message.deserialize(payload, self._auth_secret)
                 self._track_sender(message)
                 request_id = message.payload.get("request_id")
                 if request_id is not None:

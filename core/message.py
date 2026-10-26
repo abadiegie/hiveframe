@@ -11,6 +11,9 @@ import time
 from typing import Any
 import uuid
 
+import hashlib
+import hmac
+import os
 import msgpack
 
 
@@ -56,8 +59,8 @@ class Message:
     timestamp: float
     payload: dict[str, Any]
 
-    def serialize(self) -> bytes:
-        """Serialize message to MessagePack bytes."""
+    def serialize(self, auth_secret: str | bytes | None = None) -> bytes:
+        """Serialize message to MessagePack bytes, optionally HMAC-signed."""
         raw = {
             "type": self.type.value,
             "sender_id": self.sender_id,
@@ -65,11 +68,33 @@ class Message:
             "timestamp": self.timestamp,
             "payload": self.payload,
         }
-        return msgpack.packb(raw, use_bin_type=True)
+        body = msgpack.packb(raw, use_bin_type=True)
+        secret = auth_secret or os.environ.get("HIVEFRAME_CLUSTER_SECRET", "")
+        if not secret:
+            return body
+        signature = hmac.new(
+            secret.encode("utf-8") if isinstance(secret, str) else secret,
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+        return body + signature.encode("ascii")
 
     @classmethod
-    def deserialize(cls, data: bytes) -> "Message":
-        """Deserialize MessagePack bytes into Message."""
+    def deserialize(cls, data: bytes, auth_secret: str | bytes | None = None) -> "Message":
+        """Deserialize and verify an optionally HMAC-signed message."""
+        secret = auth_secret or os.environ.get("HIVEFRAME_CLUSTER_SECRET", "")
+        if secret:
+            if len(data) < 64:
+                raise ValueError("Signed cluster message is truncated")
+            body, signature = data[:-64], data[-64:]
+            expected = hmac.new(
+                secret.encode("utf-8") if isinstance(secret, str) else secret,
+                body,
+                hashlib.sha256,
+            ).hexdigest().encode("ascii")
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("Cluster message authentication failed")
+            data = body
         raw = msgpack.unpackb(data, raw=False)
         return cls(
             type=MessageType(raw["type"]),
