@@ -288,12 +288,17 @@ class TCPTransport:
         self._peers: dict[str, tuple[str, int]] = {}
         self._server: asyncio.AbstractServer | None = None
         self._running = False
+        self._auth_secret: str = os.environ.get("HIVEFRAME_CLUSTER_SECRET", "")
 
     def register_peer(self, node_id: str, host: str, port: int) -> None:
         self._peers[node_id] = (host, port)
         self.__class__._known_addresses[node_id] = (host, port)
 
     async def listen(self, host: str, port: int) -> None:
+        if host not in {"127.0.0.1", "::1", "localhost"} and not self._auth_secret:
+            raise RuntimeError(
+                "HIVEFRAME_CLUSTER_SECRET is required when the cluster binds a non-loopback address"
+            )
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
