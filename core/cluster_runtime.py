@@ -371,6 +371,19 @@ class ClusterRuntime:
             weight=_resolve_partition_weight(self.config.partition_weight),
         )
 
+        # A follower must not reset the partition ownership that the leader
+        # assigned on a previous run. Keep the existing critical metadata and
+        # update only liveness fields.
+        if not self.config.is_leader:
+            try:
+                existing = await self.registry.get_node(self.config.node_id)
+            except Exception:
+                existing = None
+            if existing is not None:
+                node_info.partition_start = existing.partition_start
+                node_info.partition_end = existing.partition_end
+                node_info.leader_epoch = getattr(existing, "leader_epoch", 0)
+
         await self.registry.register(node_info)
         logger.info("Node registered: %s (role=%s host=%s port=%s)", node_info.node_id, node_info.role, node_info.host, node_info.port)
         self._audit_event("JOIN", {
