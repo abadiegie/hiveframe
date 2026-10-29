@@ -609,6 +609,36 @@ class ClusterRuntime:
             self.coordinator._is_leader = False
             self.coordinator._leader_node_id = leader_node_id
 
+        # The follower uses a local registry. Populate it from the leader's
+        # membership payload; otherwise the required-cluster gate cannot see
+        # the leader and startup falls back to local mode.
+        members = message.payload.get("members")
+        if isinstance(members, list):
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                node_id = str(member.get("node_id") or "").strip()
+                if not node_id:
+                    continue
+                existing = await self.registry.get_node(node_id)
+                node = self._NodeInfo(
+                    node_id=node_id,
+                    host=str(member.get("host") or (existing.host if existing else "127.0.0.1")),
+                    port=int(member.get("port") or (existing.port if existing else 0)),
+                    role=str(member.get("role") or (existing.role if existing else "write")),
+                    region=str(member.get("region") or (existing.region if existing else self.config.region)),
+                    partition_start=existing.partition_start if existing else 0,
+                    partition_end=existing.partition_end if existing else 10000,
+                    last_seen=time.time(),
+                    lsn=existing.lsn if existing else 0,
+                    status="healthy",
+                    leader_reachable=True,
+                    wal_reachable=True,
+                    leader_epoch=getattr(existing, "leader_epoch", 0) if existing else 0,
+                    weight=getattr(existing, "weight", 1.0) if existing else 1.0,
+                )
+                await self.registry.register(node)
+
         if self.config.is_leader or self.op_log is None:
             return
 
