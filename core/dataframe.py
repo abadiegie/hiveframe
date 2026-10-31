@@ -156,7 +156,8 @@ class DFrame:
         # Version-based snapshot cache: invalidated whenever write_node._version changes.
         # Stores (frame, write_node_version) so any external write (e.g. via AgentWriter)
         # is reflected on the next read_fresh() call without needing manual invalidation.
-        self._snapshot_cache: tuple[pd.DataFrame, int] | None = None  # (frame, version)
+        self._snapshot_cache: tuple[pd.DataFrame, int] | None = None
+        self._distributed_row_count: int | None = None  # (frame, version)
         if data:
             self._seed_initial_data(data)
 
@@ -762,6 +763,7 @@ class DFrame:
             if on_progress:
                 on_progress(total)
         self._invalidate_snapshot_cache()
+        self._distributed_row_count = total
         return total
 
     def _seed_initial_data(self, data: dict[str, list[Any]]) -> None:
@@ -1374,6 +1376,8 @@ class DFrame:
         Urutan sumber: catatan baris write node (paling murah), metadata parquet,
         lalu snapshot memori sebagai jalan terakhir.
         """
+        if self._distributed_row_count is not None:
+            return int(self._distributed_row_count)
         wn = getattr(self._coordinator, "write_node", None)
         if wn is not None:
             with wn._lock:
