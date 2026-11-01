@@ -1430,6 +1430,48 @@ class ClusterRuntime:
                 frames.append(result)
         return self._merge_snapshots(frames)
 
+    async def iter_global_snapshots_for(self, frame_id: str):
+        """Yield local and remote writer partitions one at a time.
+
+        Unlike read_global_snapshot_for(), this never merges every writer into
+        one DataFrame. Callers can profile a distributed frame with peak memory
+        proportional to the largest partition, not the whole frame.
+        """
+        from .message import Message, MessageType
+
+        yield self._build_frame_snapshot(frame_id)
+
+        write_nodes = await self.registry.get_write_nodes()
+        await self._refresh_transport_peers()
+        remote_nodes = [n for n in write_nodes if n.node_id != self.config.node_id]
+        if not remote_nodes or not self.config.enable_cluster:
+            return
+
+        async def fetch_one(node_id: str) -> pd.DataFrame:
+            request_id = str(uuid.uuid4())
+            msg = Message.build(
+                message_type=MessageType.READ_SNAPSHOT_REQUEST,
+                sender_id=self.config.node_id,
+                sender_region=self.config.region,
+                payload={"request_id": request_id, "frame_id": frame_id},
+            )
+            response = await self.transport.request(node_id, msg, timeout=5.0)
+            if response is None:
+                logger.warning("Snapshot request to node %s timed out", node_id)
+                return pd.DataFrame()
+            raw_snapshot = dict(response.payload.get("snapshot", {}))
+            snapshot_dict = {str(k): v for k, v in raw_snapshot.items()}
+            return self._frame_from_dict(snapshot_dict)
+
+        for node in remote_nodes:
+            try:
+                frame = await fetch_one(node.node_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to fetch frame snapshot from remote writer %s: %s", node.node_id, exc)
+                continue
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                yield frame
+
     def _build_frame_snapshot(self, frame_id: str) -> pd.DataFrame:
         """Build a clean DataFrame from write_node columns belonging to frame_id.
 
