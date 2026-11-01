@@ -453,6 +453,9 @@ class ReplicationManager:
         """Register handler for distributed seed chunks received over transport."""
         self._seed_chunk_handler = handler
 
+    def set_structural_handler(self, handler: Callable[[Message], Awaitable[None]] | None) -> None:
+        self._structural_op_handler = handler
+
     def set_cluster_control_handlers(
         self,
         *,
