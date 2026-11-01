@@ -271,6 +271,7 @@ class ClusterRuntime:
             pull_handler=self._handle_oplog_pull,
             full_resync_handler=self._handle_oplog_full_resync,
         )
+        self.replication.set_structural_handler(self._handle_structural_op)
         # Wire replication back into coordinator so commits trigger delta broadcast.
         self.coordinator.replication_manager = self.replication
         self.heartbeat = HeartbeatManager(
@@ -696,6 +697,122 @@ class ClusterRuntime:
                     "Writes will NOT be blocked; set leader_node_id to enforce single-writer guard.",
                     config.node_id,
                 )
+
+    def apply_structural_local(self, frame_id: str, kind: str, params: dict[str, Any]) -> None:
+        """Apply one structural operation to this writer's local shard."""
+        from .dataframe import DFrame
+
+        df = DFrame(
+            coordinator=self.coordinator,
+            frame_id=frame_id,
+            transactional=True,
+        )
+        # Structural operations must target this writer, not route through the
+        # partition map again.
+        df._runtime = None
+        if kind == "rows_append":
+            df.append_rows(int(params.get("count") or 1), params.get("default"))
+        elif kind == "rows_insert":
+            df.insert_rows(
+                int(params.get("count") or 1),
+                at=int(params.get("at") or 0),
+                default=params.get("default"),
+            )
+        elif kind == "rows_delete":
+            df.delete_rows(rows=[int(index) for index in (params.get("rows") or [])])
+        elif kind == "rows_restore":
+            df.insert_rows(
+                1,
+                at=int(params.get("at") or 0),
+                row_ids=[str(params.get("row_id"))] if params.get("row_id") else None,
+            )
+        elif kind == "columns_add":
+            df.add_column(str(params.get("name") or ""), params.get("values"), params.get("at"))
+        elif kind == "columns_delete":
+            df.drop_column(str(params.get("name") or ""), params.get("values"))
+        else:
+            raise ValueError(f"Unsupported structural kind '{kind}'")
+
+    async def _handle_structural_op(self, message: Any) -> None:
+        from .message import Message, MessageType
+
+        payload = dict(message.payload or {})
+        request_id = payload.get("request_id")
+        try:
+            self.apply_structural_local(
+                str(payload.get("frame_id") or ""),
+                str(payload.get("kind") or ""),
+                payload.get("params") if isinstance(payload.get("params"), dict) else {},
+            )
+            status = "ok"
+            error = None
+        except Exception as exc:  # noqa: BLE001 - communicate failure to coordinator
+            logger.warning("Remote structural op failed: %s", exc)
+            status = "failed"
+            error = str(exc)
+        ack = Message.build(
+            message_type=MessageType.STRUCTURAL_ACK,
+            sender_id=self.config.node_id,
+            sender_region=self.config.region,
+            payload={
+                "request_id": request_id,
+                "status": status,
+                "error": error,
+                "epoch": self.op_log.get_leader_epoch() if self.op_log is not None else 0,
+            },
+        )
+        await self.transport.send(message.sender_id, ack)
+
+    async def submit_structural_remote(
+        self,
+        frame_id: str,
+        kind: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply a structural op locally and collect acknowledgements from writers."""
+        import uuid
+
+        from .message import Message, MessageType
+
+        shards: list[dict[str, Any]] = []
+        try:
+            self.apply_structural_local(frame_id, kind, params)
+            shards.append({"node_id": self.config.node_id, "status": "ok"})
+        except Exception as exc:  # noqa: BLE001
+            shards.append({"node_id": self.config.node_id, "status": "failed", "error": str(exc)})
+            return {"applied": False, "shards": shards}
+
+        write_nodes = await self.registry.get_write_nodes()
+        await self._refresh_transport_peers()
+        for node in write_nodes:
+            if node.node_id == self.config.node_id:
+                continue
+            request_id = str(uuid.uuid4())
+            request = Message.build(
+                message_type=MessageType.STRUCTURAL_OP,
+                sender_id=self.config.node_id,
+                sender_region=self.config.region,
+                payload={
+                    "request_id": request_id,
+                    "frame_id": frame_id,
+                    "kind": kind,
+                    "params": params,
+                },
+            )
+            response = await self.transport.request(node.node_id, request, timeout=5.0)
+            if response is None:
+                shards.append({"node_id": node.node_id, "status": "timeout"})
+                return {"applied": False, "shards": shards}
+            payload = dict(response.payload or {})
+            shards.append({
+                "node_id": node.node_id,
+                "status": str(payload.get("status") or "failed"),
+                "error": payload.get("error"),
+                "epoch": payload.get("epoch"),
+            })
+            if payload.get("status") != "ok":
+                return {"applied": False, "shards": shards}
+        return {"applied": True, "shards": shards}
 
     def get_local_capability(self) -> str:
         """Return this node's capability synchronously (best-effort, no network I/O).

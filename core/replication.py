@@ -59,6 +59,7 @@ class ReplicationManager:
         self._join_handler: Callable[[Message], Awaitable[None]] | None = None
         self._membership_update_handler: Callable[[Message], Awaitable[None]] | None = None
         self._route_update_handler: Callable[[Message], Awaitable[None]] | None = None
+        self._structural_op_handler: Callable[[Message], Awaitable[None]] | None = None
         self._oplog_push_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
         self._oplog_pull_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
         self._oplog_full_resync_handler: Callable[[Message], Awaitable[dict[str, Any]]] | None = None
@@ -148,6 +149,9 @@ class ReplicationManager:
             await self._handle_membership_update(message)
         elif message.type == MessageType.ROUTE_UPDATE:
             await self._handle_route_update(message)
+        elif message.type == MessageType.STRUCTURAL_OP:
+            if self._structural_op_handler is not None:
+                await self._structural_op_handler(message)
         elif message.type == MessageType.OPLOG_PUSH:
             await self._handle_oplog_push(message)
         elif message.type == MessageType.OPLOG_PULL:

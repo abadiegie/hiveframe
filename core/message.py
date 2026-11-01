@@ -44,6 +44,9 @@ class MessageType(Enum):
     OPLOG_FULL_RESYNC = "oplog_full_resync"
     OPLOG_FULL_RESYNC_RESPONSE = "oplog_full_resync_response"
 
+    STRUCTURAL_OP = "structural_op"
+    STRUCTURAL_ACK = "structural_ack"
+
     PARTITION_MAP = "partition_map"
     ELECT_LEADER = "elect_leader"
     REBALANCE = "rebalance"
