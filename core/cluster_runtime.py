@@ -698,7 +698,14 @@ class ClusterRuntime:
                     config.node_id,
                 )
 
-    def apply_structural_local(self, frame_id: str, kind: str, params: dict[str, Any]) -> None:
+    def apply_structural_local(
+        self,
+        frame_id: str,
+        kind: str,
+        params: dict[str, Any],
+        *,
+        row_offset: int = 0,
+    ) -> None:
         """Apply one structural operation to this writer's local shard."""
         from .dataframe import DFrame
 
@@ -715,13 +722,13 @@ class ClusterRuntime:
         elif kind == "rows_insert":
             ok = df.insert_rows(
                 int(params.get("count") or 1),
-                at=int(params.get("at") or 0),
+                at=max(0, int(params.get("at") or 0) - row_offset),
                 default=params.get("default"),
             )
         elif kind == "rows_delete":
-            ok = df.delete_rows(rows=[int(index) for index in (params.get("rows") or [])])
+            ok = df.delete_rows(rows=[max(0, int(index) - row_offset) for index in (params.get("rows") or [])])
         elif kind == "rows_restore":
-            at = int(params.get("at") or 0)
+            at = max(0, int(params.get("at") or 0) - row_offset)
             ok = df.insert_rows(
                 1,
                 at=at,
@@ -763,6 +770,7 @@ class ClusterRuntime:
                 str(payload.get("frame_id") or ""),
                 str(payload.get("kind") or ""),
                 payload.get("params") if isinstance(payload.get("params"), dict) else {},
+                row_offset=int(payload.get("row_offset") or 0),
             )
             status = "ok"
             error = None
@@ -789,23 +797,45 @@ class ClusterRuntime:
         kind: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Apply a structural op locally and collect acknowledgements from writers."""
+        """Apply a structural op to the shard(s) that own the affected rows.
+
+        Row insert/delete/restore target exactly one partition owner. Row append
+        targets the last partition. Column shape changes target every writer.
+        """
         import uuid
 
         from .message import Message, MessageType
 
-        shards: list[dict[str, Any]] = []
-        try:
-            self.apply_structural_local(frame_id, kind, params)
-            shards.append({"node_id": self.config.node_id, "status": "ok"})
-        except Exception as exc:  # noqa: BLE001
-            shards.append({"node_id": self.config.node_id, "status": "failed", "error": str(exc)})
-            return {"applied": False, "shards": shards}
-
         write_nodes = await self.registry.get_write_nodes()
+        row_offset = 0
+        if kind in {"rows_insert", "rows_delete", "rows_restore"}:
+            row = int(params.get("at") or 0)
+            if kind == "rows_delete":
+                rows = params.get("rows") or []
+                row = int(rows[0]) if rows else 0
+            owner = self.route_write(row)
+            target_ids = {owner.node_id} if owner is not None else {self.config.node_id}
+            if owner is not None:
+                row_offset = int(owner.partition_start or 0)
+        elif kind == "rows_append":
+            # Append at the end of the global row order, not once per shard.
+            last = max(write_nodes, key=lambda node: int(node.partition_end or 0), default=None)
+            target_ids = {last.node_id if last is not None else self.config.node_id}
+        else:
+            target_ids = {node.node_id for node in write_nodes} or {self.config.node_id}
+
+        shards: list[dict[str, Any]] = []
+        if self.config.node_id in target_ids:
+            try:
+                self.apply_structural_local(frame_id, kind, params, row_offset=row_offset)
+                shards.append({"node_id": self.config.node_id, "status": "ok"})
+            except Exception as exc:  # noqa: BLE001
+                shards.append({"node_id": self.config.node_id, "status": "failed", "error": str(exc)})
+                return {"applied": False, "shards": shards}
+
         await self._refresh_transport_peers()
         for node in write_nodes:
-            if node.node_id == self.config.node_id:
+            if node.node_id == self.config.node_id or node.node_id not in target_ids:
                 continue
             request_id = str(uuid.uuid4())
             request = Message.build(
@@ -817,6 +847,7 @@ class ClusterRuntime:
                     "frame_id": frame_id,
                     "kind": kind,
                     "params": params,
+                    "row_offset": row_offset,
                 },
             )
             response = await self.transport.request(node.node_id, request, timeout=5.0)
