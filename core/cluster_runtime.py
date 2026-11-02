@@ -721,11 +721,29 @@ class ClusterRuntime:
         elif kind == "rows_delete":
             df.delete_rows(rows=[int(index) for index in (params.get("rows") or [])])
         elif kind == "rows_restore":
+            at = int(params.get("at") or 0)
             df.insert_rows(
                 1,
-                at=int(params.get("at") or 0),
+                at=at,
                 row_ids=[str(params.get("row_id"))] if params.get("row_id") else None,
             )
+            values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            if values:
+                from .transaction import Operation
+
+                operations = [
+                    Operation(
+                        cell_id=df._cell_id(str(column), at),
+                        old_value=None,
+                        new_value=value,
+                        author_type="human",
+                        author_id="frame-command",
+                    )
+                    for column, value in values.items()
+                    if str(column)
+                ]
+                if operations:
+                    df._submit_routed({"local": operations})
         elif kind == "columns_add":
             df.add_column(str(params.get("name") or ""), params.get("values"), params.get("at"))
         elif kind == "columns_delete":
