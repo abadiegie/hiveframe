@@ -515,6 +515,19 @@ class TCPTransport:
             return
         await asyncio.gather(*(self.send(node_id, message) for node_id in targets))
 
+    def _invalidate_outbound(self, node_id: str) -> None:
+        """Drop a pooled connection that stopped answering (e.g. peer restart)."""
+        target = self._resolve_target(node_id)
+        if target is None:
+            return
+        key = f"{target[0]}:{target[1]}"
+        pooled = self.__class__._outbound.pop(key, None)
+        if pooled is not None:
+            try:
+                pooled[1].close()
+            except Exception:
+                pass
+
     async def request(self, node_id: str, message: Message, timeout: float = 5.0) -> Message | None:
         request_id = message.payload.get("request_id")
         if request_id is None:
@@ -527,6 +540,10 @@ class TCPTransport:
             await self.send(node_id, message)
             return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except asyncio.TimeoutError:
+            # The pooled socket can be half-open after a peer restart. Evict it
+            # so the next pull opens a fresh connection instead of timing out
+            # forever on the same dead socket.
+            self._invalidate_outbound(node_id)
             logger.warning("TCPTransport.request timeout: node=%s request_id=%s", node_id, request_id)
             return None
         finally:
