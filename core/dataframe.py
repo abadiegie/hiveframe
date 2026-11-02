@@ -1087,7 +1087,7 @@ class DFrame:
         at: int | None = None,
         default: Any = None,
         row_ids: list[str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Sisipkan `count` baris pada posisi `at` (default: akhir frame).
 
         `row_ids` opsional dipakai untuk mengembalikan identitas baris yang pernah
@@ -1100,7 +1100,7 @@ class DFrame:
             payload["row_ids"] = [str(rid) for rid in row_ids]
         return self.submit_structural("insert_rows", payload)
 
-    def append_rows(self, count: int, default: Any = None) -> None:
+    def append_rows(self, count: int, default: Any = None) -> bool:
         """Tambah `count` baris di akhir frame sebagai satu operasi struktural."""
         return self.insert_rows(int(count), at=None, default=default)
 
@@ -1108,7 +1108,7 @@ class DFrame:
         self,
         rows: list[int] | None = None,
         row_ids: list[str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Hapus baris berdasarkan posisi, identitas, atau keduanya.
 
         Operasi mencatat identitas baris yang terhapus (deleted_row_ids) di payload
@@ -1120,7 +1120,7 @@ class DFrame:
         if row_ids:
             payload["row_ids"] = [str(r) for r in row_ids]
         if not payload:
-            return
+            return True
         return self.submit_structural("delete_rows", payload)
 
     def rename_column(self, name: str, new_name: str) -> None:
@@ -1131,11 +1131,11 @@ class DFrame:
         if isinstance(skema, dict) and name in skema:
             skema[new_name] = skema.pop(name)
 
-    def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> None:
+    def add_column(self, name: str, values: list[Any] | None = None, at: int | None = None) -> bool:
         """Tambah kolom pada posisi `at` sebagai satu operasi struktural."""
         return self.submit_structural("insert_column", {"name": name, "values": values, "at": at})
 
-    def drop_column(self, name: str, values: list[Any] | None = None) -> None:
+    def drop_column(self, name: str, values: list[Any] | None = None) -> bool:
         """Hapus kolom lewat WAL sebagai satu operasi struktural.
 
         `values` boleh diisi nilai lama kolom supaya pemulihan (restore) bisa

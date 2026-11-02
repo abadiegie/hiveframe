@@ -711,18 +711,18 @@ class ClusterRuntime:
         # partition map again.
         df._runtime = None
         if kind == "rows_append":
-            df.append_rows(int(params.get("count") or 1), params.get("default"))
+            ok = df.append_rows(int(params.get("count") or 1), params.get("default"))
         elif kind == "rows_insert":
-            df.insert_rows(
+            ok = df.insert_rows(
                 int(params.get("count") or 1),
                 at=int(params.get("at") or 0),
                 default=params.get("default"),
             )
         elif kind == "rows_delete":
-            df.delete_rows(rows=[int(index) for index in (params.get("rows") or [])])
+            ok = df.delete_rows(rows=[int(index) for index in (params.get("rows") or [])])
         elif kind == "rows_restore":
             at = int(params.get("at") or 0)
-            df.insert_rows(
+            ok = df.insert_rows(
                 1,
                 at=at,
                 row_ids=[str(params.get("row_id"))] if params.get("row_id") else None,
@@ -745,11 +745,13 @@ class ClusterRuntime:
                 if operations:
                     df._submit_routed({"local": operations})
         elif kind == "columns_add":
-            df.add_column(str(params.get("name") or ""), params.get("values"), params.get("at"))
+            ok = df.add_column(str(params.get("name") or ""), params.get("values"), params.get("at"))
         elif kind == "columns_delete":
-            df.drop_column(str(params.get("name") or ""), params.get("values"))
+            ok = df.drop_column(str(params.get("name") or ""), params.get("values"))
         else:
             raise ValueError(f"Unsupported structural kind '{kind}'")
+        if not ok:
+            raise RuntimeError(f"Structural operation '{kind}' failed")
 
     async def _handle_structural_op(self, message: Any) -> None:
         from .message import Message, MessageType

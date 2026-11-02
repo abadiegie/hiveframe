@@ -292,7 +292,13 @@ class WriteNode:
             nilai = payload.get("default")
             if nilai is not None:
                 for col in kolom_frame:
-                    self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
+                    try:
+                        self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
+                    except (TypeError, ValueError):
+                        # Empty numeric columns are inferred as float64; a text
+                        # default must still be insertable.
+                        self._df[col] = self._df[col].astype(object)
+                        self._df.loc[posisi : posisi + jumlah - 1, col] = nilai
             # Identitas yang diminta dipakai lebih dulu (mis. pemulihan baris yang
             # pernah dihapus), sisanya dibuat baru.
             diminta = [str(x) for x in (payload.get("row_ids") or []) if str(x)][:jumlah]
