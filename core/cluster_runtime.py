@@ -1654,7 +1654,10 @@ class ClusterRuntime:
             if not matching:
                 return pd.DataFrame()
             subset = df_internal[matching].copy()
+            frame_rows = wn._frame_rows.get(frame_id)
         subset.columns = [c[len(prefix):] for c in subset.columns]
+        if frame_rows is not None:
+            subset = subset.iloc[: max(0, int(frame_rows))]
         return subset.reset_index(drop=True)
 
     @staticmethod
