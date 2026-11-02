@@ -977,12 +977,17 @@ class DFrame:
             if filter_col is not None:
                 potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
             kunci = group_cols
+            work = potongan.copy()
+            # Group keys may mix numbers and text in imported sheets; pandas
+            # cannot sort mixed keys. Normalize keys for grouping.
+            for key in kunci:
+                work[key] = work[key].map(lambda value: None if pd.isna(value) else str(value))
             if fungsi == "count":
-                hasil = potongan.groupby(kunci, dropna=False).size().reset_index(name="jumlah")
+                hasil = work.groupby(kunci, dropna=False, sort=False).size().reset_index(name="jumlah")
             elif fungsi == "mean":
-                hasil = potongan.groupby(kunci, dropna=False)[value_cols].mean().reset_index()
+                hasil = work.groupby(kunci, dropna=False, sort=False)[value_cols].mean().reset_index()
             else:
-                hasil = getattr(potongan.groupby(kunci, dropna=False)[value_cols], fungsi)().reset_index()
+                hasil = getattr(work.groupby(kunci, dropna=False, sort=False)[value_cols], fungsi)().reset_index()
             urut = value_cols[0] if value_cols else "jumlah"
             if urut in hasil.columns:
                 hasil = hasil.sort_values(urut, ascending=False)
@@ -1020,7 +1025,10 @@ class DFrame:
                 potongan = potongan[potongan[filter_col].astype(str) == str(filter_value)]
             if potongan.empty:
                 continue
-            for kunci, grup in potongan.groupby(group_cols, dropna=False):
+            work = potongan.copy()
+            for key in group_cols:
+                work[key] = work[key].map(lambda value: None if pd.isna(value) else str(value))
+            for kunci, grup in work.groupby(group_cols, dropna=False, sort=False):
                 kunci_tuple = kunci if isinstance(kunci, tuple) else (kunci,)
                 nilai = akumulasi.setdefault(kunci_tuple, {})
                 jumlah_baris[kunci_tuple] = jumlah_baris.get(kunci_tuple, 0) + len(grup)
