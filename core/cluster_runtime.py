@@ -66,6 +66,7 @@ class RuntimeConfig:
     send_base_backoff_ms: int = 200
     # Op-log sync
     sync_interval_ms: int = 1000
+    oplog_pull_batch_size: int = 500
     push_threshold_ops: int = 100
     full_resync_threshold_ops: int = 20000
     # MinIO data directory
@@ -1196,7 +1197,12 @@ class ClusterRuntime:
                     continue
 
                 since_op_id = self.op_log.get_last_acked_op_id()
-                pulled = await self.op_log.pull_from_leader(leader_id, self.transport, since_op_id)
+                pulled = await self.op_log.pull_from_leader(
+                    leader_id,
+                    self.transport,
+                    since_op_id,
+                    batch_size=int(getattr(self.config, "oplog_pull_batch_size", 500)),
+                )
                 if pulled:
                     logger.debug("Op-log pull: node=%s leader=%s pulled=%d", self.config.node_id, leader_id, pulled)
                 self._update_metrics_snapshot()
@@ -1222,8 +1228,16 @@ class ClusterRuntime:
         if self.op_log is None or not self.config.is_leader:
             return {"ops": []}
         since_op_id = message.payload.get("since_op_id")
-        ops = self.op_log.export_since(str(since_op_id) if since_op_id is not None else None)
-        return {"ops": ops}
+        raw_limit = message.payload.get("limit", 500)
+        try:
+            limit = max(1, min(int(raw_limit), 2000))
+        except (TypeError, ValueError):
+            limit = 500
+        ops = self.op_log.export_since(
+            str(since_op_id) if since_op_id is not None else None,
+            limit=limit,
+        )
+        return {"ops": ops, "limit": limit, "has_more": len(ops) >= limit}
 
     async def _handle_oplog_full_resync(self, message) -> dict[str, Any]:
         """Leader-side handler: provide full-resync via manifest/chunk/ops modes."""

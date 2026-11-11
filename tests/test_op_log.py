@@ -27,7 +27,10 @@ class _FakeTransport:
             )
         if message.type == MessageType.OPLOG_PULL:
             since = message.payload.get("since_op_id")
-            ops = self._leader_log.export_since(str(since) if since is not None else None)
+            ops = self._leader_log.export_since(
+                str(since) if since is not None else None,
+                limit=message.payload.get("limit"),
+            )
             return Message.build(
                 message_type=MessageType.OPLOG_PULL_RESPONSE,
                 sender_id="leader",
@@ -225,3 +228,28 @@ def test_operation_log_full_resync_falls_back_to_ops_on_checksum_mismatch(tmp_pa
     asyncio.run(run())
 
 
+
+
+def test_operation_log_pull_is_batched(tmp_path) -> None:
+    async def run() -> None:
+        leader_log = OperationLog(str(tmp_path / "page-leader.db"), node_id="leader", leader_epoch=1)
+        follower_log = OperationLog(str(tmp_path / "page-follower.db"), node_id="follower", leader_epoch=1)
+        for index in range(7):
+            leader_log.apply_acked([{
+                "op_id": f"1-{index + 1:020d}",
+                "entity": "registry",
+                "key": f"k{index}",
+                "value": index,
+                "version": 1,
+                "origin_node_id": "leader",
+                "created_at": float(index),
+            }])
+        transport = _FakeTransport(leader_log)
+        pulled = await follower_log.pull_from_leader("leader", transport, None, batch_size=2)
+        assert pulled == 7
+        assert len(follower_log.export_all_acked()) == 7
+        assert follower_log.get_last_acked_op_id() == "1-00000000000000000007"
+        leader_log.close()
+        follower_log.close()
+
+    asyncio.run(run())

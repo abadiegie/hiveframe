@@ -201,15 +201,30 @@ class OperationLog:
             return None
         return str(row[0])
 
-    def export_since(self, since_op_id: str | None) -> list[dict[str, Any]]:
+    def export_since(
+        self,
+        since_op_id: str | None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return acked operations after ``since_op_id``.
+
+        ``limit`` bounds one replication response. The leader must not serialize
+        the entire history into a single TCP frame; a large frame can exceed the
+        8 MB transport limit and make every follower pull time out.
+        """
+        bounded = None if limit is None else max(1, min(int(limit), 2000))
         if since_op_id:
             query = (
-                "SELECT * FROM op_log WHERE status='acked' AND op_id > ? ORDER BY op_id"
+                "SELECT * FROM op_log WHERE status='acked' AND op_id > ? "
+                "ORDER BY op_id"
             )
             params: tuple[Any, ...] = (since_op_id,)
         else:
             query = "SELECT * FROM op_log WHERE status='acked' ORDER BY op_id"
             params = ()
+        if bounded is not None:
+            query += " LIMIT ?"
+            params = (*params, bounded)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
@@ -307,10 +322,18 @@ class OperationLog:
 
         return {"acked_ops": acked, "rejected_ops": rejected}
 
-    async def push_to_leader(self, leader_node_id: str, transport: Any) -> int:
+    async def push_to_leader(
+        self,
+        leader_node_id: str,
+        transport: Any,
+        batch_size: int = 500,
+    ) -> int:
         pending = self.get_pending_ops()
         if not pending:
             return 0
+        # Bound the request as well as the pull response. A large pending
+        # batch would otherwise serialize beyond the TCP frame budget.
+        pending = pending[:max(1, min(int(batch_size), 2000))]
         request_id = f"oplog-push-{self.node_id}-{int(time.time() * 1000)}"
         payload = {
             "request_id": request_id,
@@ -342,25 +365,43 @@ class OperationLog:
         leader_node_id: str,
         transport: Any,
         since_op_id: str | None,
+        batch_size: int = 500,
     ) -> int:
-        request_id = f"oplog-pull-{self.node_id}-{int(time.time() * 1000)}"
-        msg = Message.build(
-            message_type=MessageType.OPLOG_PULL,
-            sender_id=self.node_id,
-            sender_region="cluster",
-            payload={
-                "request_id": request_id,
-                "since_op_id": since_op_id,
-            },
-        )
-        response = await transport.request(leader_node_id, msg, timeout=5.0)
-        if response is None:
-            return 0
-        ops = list(response.payload.get("ops", []))
-        if not ops:
-            return 0
-        self.apply_acked(ops)
-        return len(ops)
+        """Pull acked ops in bounded pages until the follower catches up.
+
+        A single unbounded response was the cause of repeated
+        ``TCPTransport.request timeout`` warnings when the leader's op-log
+        exceeded the transport frame budget.
+        """
+        limit = max(1, min(int(batch_size), 2000))
+        cursor = since_op_id
+        received = 0
+        # Defensive upper bound for a pathological peer that never advances.
+        for _page in range(10_000):
+            request_id = f"oplog-pull-{self.node_id}-{int(time.time() * 1000)}"
+            msg = Message.build(
+                message_type=MessageType.OPLOG_PULL,
+                sender_id=self.node_id,
+                sender_region="cluster",
+                payload={
+                    "request_id": request_id,
+                    "since_op_id": cursor,
+                    "limit": limit,
+                },
+            )
+            response = await transport.request(leader_node_id, msg, timeout=5.0)
+            if response is None:
+                break
+            ops = list(response.payload.get("ops", []))
+            if not ops:
+                break
+            self.apply_acked(ops)
+            received += len(ops)
+            next_cursor = str(ops[-1].get("op_id") or "")
+            if len(ops) < limit or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return received
 
     async def full_resync_from_leader(self, leader_node_id: str, transport: Any) -> None:
         manifest = await self._request_full_resync_manifest(leader_node_id, transport)
