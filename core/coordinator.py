@@ -97,6 +97,7 @@ class TransactionCoordinator:
         )
         self._write_forward_url: str | None = None
         self._write_forward_token: str = ""
+        self._write_forward_version: int | None = None
         self.write_node.set_delta_callback(self.read_node.receive_delta)
         self._wal_replay_task: asyncio.Task[None] | None = None
         self._wal_replay_stop: asyncio.Event | None = None
@@ -137,7 +138,10 @@ class TransactionCoordinator:
             from types import SimpleNamespace
             first = operations[0].cell_id if operations else ""
             frame_id = first.split("::", 1)[0] if "::" in first else ""
-            body = json.dumps({"frame_id": frame_id, "operations": [op.to_dict() for op in operations]}).encode()
+            body_payload = {"frame_id": frame_id, "operations": [op.to_dict() for op in operations]}
+            if self._write_forward_version is not None:
+                body_payload["base_version"] = self._write_forward_version
+            body = json.dumps(body_payload).encode()
             request = urllib.request.Request(
                 self._write_forward_url,
                 data=body,
@@ -148,6 +152,8 @@ class TransactionCoordinator:
                 payload = json.loads(response.read().decode())
             if not payload.get("ok"):
                 raise RuntimeError(str(payload.get("error") or "leader rejected write"))
+            if payload.get("version") is not None:
+                self._write_forward_version = int(payload["version"])
             return SimpleNamespace(state=TxState.COMMITTED, tx_id=payload.get("tx_id"), version=payload.get("version"))  # type: ignore[return-value]
         # Leader guard: if leader_node_id is configured and this is not the leader, reject writes.
         if (
