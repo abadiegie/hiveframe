@@ -1169,6 +1169,7 @@ class DFrame:
             self._runtime is not None
             and self._runtime.config.enable_cluster
             and not self._allow_follower_writes
+            and not getattr(self._coordinator, "is_write_forwarding", False)
         ):
             cap = self._runtime.get_local_capability()
             if cap != "rw":
@@ -1206,6 +1207,8 @@ class DFrame:
           Stage-3 can replace this with a real remote-write proxy.
         """
         if self._runtime is None or node_id in ("local", self._runtime.config.node_id):
+            return self._coordinator
+        if getattr(self._coordinator, "is_write_forwarding", False):
             return self._coordinator
         if self._allow_follower_writes:
             # Explicit worker mode: the worker owns the job and writes the

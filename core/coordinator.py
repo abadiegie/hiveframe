@@ -95,6 +95,8 @@ class TransactionCoordinator:
             str(os.getenv("HIVEFRAME_ALLOW_FOLLOWER_WRITES", "")).strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        self._write_forward_url: str | None = None
+        self._write_forward_token: str = ""
         self.write_node.set_delta_callback(self.read_node.receive_delta)
         self._wal_replay_task: asyncio.Task[None] | None = None
         self._wal_replay_stop: asyncio.Event | None = None
@@ -119,8 +121,34 @@ class TransactionCoordinator:
 
         logger.info("TransactionCoordinator initialized write_node=%s read_node=%s", getattr(self.write_node, 'node_id', 'local'), getattr(self.read_node, 'node_id', 'local'))
 
+    @property
+    def is_write_forwarding(self) -> bool:
+        return self._write_forward_url is not None and not self._is_leader
+
+    def set_write_forward_url(self, url: str, token: str = "") -> None:
+        self._write_forward_url = str(url).strip() or None
+        self._write_forward_token = token
+
     def submit(self, operations: list[Operation]) -> Transaction:
-        """Execute full transaction lifecycle for a list of operations."""
+        """Execute full transaction or forward it to the leader."""
+        if self.is_write_forwarding:
+            import json
+            import urllib.request
+            from types import SimpleNamespace
+            first = operations[0].cell_id if operations else ""
+            frame_id = first.split("::", 1)[0] if "::" in first else ""
+            body = json.dumps({"frame_id": frame_id, "operations": [op.to_dict() for op in operations]}).encode()
+            request = urllib.request.Request(
+                self._write_forward_url,
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json", "X-Worker-Token": self._write_forward_token},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode())
+            if not payload.get("ok"):
+                raise RuntimeError(str(payload.get("error") or "leader rejected write"))
+            return SimpleNamespace(state=TxState.COMMITTED, tx_id=payload.get("tx_id"), version=payload.get("version"))  # type: ignore[return-value]
         # Leader guard: if leader_node_id is configured and this is not the leader, reject writes.
         if (
             self._leader_node_id is not None
