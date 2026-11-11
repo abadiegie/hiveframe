@@ -56,6 +56,10 @@ class RuntimeConfig:
     # Leader config (Phase 2)
     is_leader: bool = False
     leader_node_id: str | None = None
+    # HiveSheet worker mode: workers execute write jobs against replicated
+    # frames. Deployments without a remote-write proxy can set this explicitly
+    # instead of relying on a process-wide environment variable.
+    allow_follower_writes: bool = False
     # Heartbeat config
     heartbeat_interval_ms: int = 1000
     heartbeat_timeout_ms: int = 5000
@@ -209,6 +213,9 @@ class ClusterRuntime:
         self.coordinator._node_id = config.node_id
         self.coordinator._is_leader = config.is_leader
         self.coordinator._leader_node_id = config.leader_node_id
+        self.coordinator._allow_follower_writes = bool(
+            getattr(config, "allow_follower_writes", False)
+        ) or self.coordinator._allow_follower_writes
 
         if config.wal_replay_cursor_path:
             self.coordinator.set_wal_replay_cursor_path(config.wal_replay_cursor_path)

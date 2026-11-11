@@ -153,7 +153,9 @@ class DFrame:
         self._schema = schema or {}
         self._transactional = transactional
         self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "1") != "0"
-        self._allow_follower_writes = (
+        self._allow_follower_writes = bool(
+            getattr(getattr(runtime, "config", None), "allow_follower_writes", False)
+        ) or (
             str(os.getenv("HIVEFRAME_ALLOW_FOLLOWER_WRITES", "")).strip().lower()
             in {"1", "true", "yes", "on"}
         )
