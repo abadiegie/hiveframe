@@ -121,3 +121,16 @@ def test_tcp_transport_legacy_shim_inside_running_event_loop() -> None:
         assert response == {"ok": True, "echo": {"n": 9}}
 
     asyncio.run(run())
+
+
+def test_inbound_message_revives_dead_peer() -> None:
+    transport = TCPTransport(host="127.0.0.1", port=19220, node_id="node-a")
+    transport._dead_nodes.add("node-b")
+    message = Message.build(
+        message_type=MessageType.HEARTBEAT,
+        sender_id="node-b",
+        sender_region="local",
+        payload={"__tcp_sender_host": "127.0.0.1", "__tcp_sender_port": 19221},
+    )
+    transport._track_sender(message)
+    assert "node-b" not in transport._dead_nodes

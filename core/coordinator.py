@@ -87,6 +87,14 @@ class TransactionCoordinator:
         self._node_id = node_id
         self._is_leader = is_leader
         self._leader_node_id = leader_node_id
+        # HiveSheet workers own data partitions and execute write jobs such as
+        # VLOOKUP/normalize. This deployment does not yet have a remote write
+        # proxy, so an explicit opt-in allows a write worker to apply its own
+        # partition locally. Leader-only deployments keep the guard at default.
+        self._allow_follower_writes = (
+            str(os.getenv("HIVEFRAME_ALLOW_FOLLOWER_WRITES", "")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         self.write_node.set_delta_callback(self.read_node.receive_delta)
         self._wal_replay_task: asyncio.Task[None] | None = None
         self._wal_replay_stop: asyncio.Event | None = None
@@ -118,6 +126,7 @@ class TransactionCoordinator:
             self._leader_node_id is not None
             and self._node_id is not None
             and self._node_id != self._leader_node_id
+            and not self._allow_follower_writes
         ):
             raise NotLeaderError(
                 f"Write rejected: this node ({self._node_id!r}) is not the leader "

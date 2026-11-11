@@ -153,6 +153,10 @@ class DFrame:
         self._schema = schema or {}
         self._transactional = transactional
         self._strict_remote_routing = os.getenv("HIVEFRAME_STRICT_REMOTE_ROUTING", "1") != "0"
+        self._allow_follower_writes = (
+            str(os.getenv("HIVEFRAME_ALLOW_FOLLOWER_WRITES", "")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         # Version-based snapshot cache: invalidated whenever write_node._version changes.
         # Stores (frame, write_node_version) so any external write (e.g. via AgentWriter)
         # is reflected on the next read_fresh() call without needing manual invalidation.
@@ -1159,7 +1163,11 @@ class DFrame:
         """Submit operation groups to the correct coordinator per owning node."""
         # Capability gate: check if this node can accept writes.
         # Only enforced when cluster is enabled — prevents silent corruption.
-        if self._runtime is not None and self._runtime.config.enable_cluster:
+        if (
+            self._runtime is not None
+            and self._runtime.config.enable_cluster
+            and not self._allow_follower_writes
+        ):
             cap = self._runtime.get_local_capability()
             if cap != "rw":
                 from .coordinator import CapabilityError
@@ -1196,6 +1204,12 @@ class DFrame:
           Stage-3 can replace this with a real remote-write proxy.
         """
         if self._runtime is None or node_id in ("local", self._runtime.config.node_id):
+            return self._coordinator
+        if self._allow_follower_writes:
+            # Explicit worker mode: the worker owns the job and writes the
+            # complete frame locally. A remote write proxy is not available in
+            # this deployment yet; without this, rows assigned to the leader
+            # fail with "Cannot resolve remote coordinator".
             return self._coordinator
         # Look up a remote runtime in the shared in-memory registry (same process).
         # In a real multi-process deployment this would be replaced by a transport-based proxy.

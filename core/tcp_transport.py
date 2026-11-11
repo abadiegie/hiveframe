@@ -627,5 +627,9 @@ class TCPTransport:
         if isinstance(sender_host, str) and isinstance(sender_port, int):
             self.register_peer(message.sender_id, sender_host, sender_port)
             self._connected_nodes.add(message.sender_id)
+            # An inbound message proves the peer is alive. Without clearing the
+            # dead mark, every response send is skipped forever and the peer's
+            # oplog/snapshot requests time out even after a successful reconnect.
+            self._dead_nodes.discard(message.sender_id)
 
 
