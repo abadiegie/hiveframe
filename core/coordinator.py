@@ -130,6 +130,14 @@ class TransactionCoordinator:
         self._write_forward_url = str(url).strip() or None
         self._write_forward_token = token
 
+    def set_local_write_enabled(self, enabled: bool = True) -> None:
+        """Allow this node to apply writes locally instead of forwarding to a leader.
+
+        Used by HiveSheet workers in the Parquet-backed, broker-only mode where
+        the cluster no longer owns the write path.
+        """
+        self._allow_follower_writes = enabled
+
     def submit(self, operations: list[Operation]) -> Transaction:
         """Execute full transaction or forward it to the leader."""
         if self.is_write_forwarding:
