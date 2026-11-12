@@ -107,3 +107,18 @@ class TestPrune:
 
         assert df.prune_checkpoints(keep_last=10, keep_named=True) == 0
         assert len(df.list_commits()) == 2
+
+
+class TestCheckpointSameLabel:
+    def test_recreating_same_label_does_not_self_parent(self) -> None:
+        # A repeated label (e.g. two edits to the same cell) used to pick the
+        # checkpoint being recreated as its own parent, producing a circular
+        # delta chain that broke diff and rollback.
+        df = _frame("f3-same-label")
+        df.checkpoint("same")
+        df["a"] = [3, 4]
+        df.checkpoint("same")
+
+        entri = df._checkpoints["same"]
+        assert entri.get("parent") != "same"
+        assert df.checkpoint_snapshot("same").to_dict(orient="list") == {"a": [3, 4]}

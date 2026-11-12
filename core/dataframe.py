@@ -1662,7 +1662,10 @@ class DFrame:
             self._checkpoints = {}
         checkpoint_id = label or f"cp_{int(time.time())}"
         current_lsn = self._coordinator.wal._next_lsn - 1
-        induk = next(reversed(self._checkpoints), None)
+        # Re-creating a checkpoint with the same label must not use itself as
+        # its parent, which would form a self-referential delta chain and break
+        # diff/rollback.
+        induk = next((k for k in reversed(self._checkpoints) if k != checkpoint_id), None)
         entri = self._bangun_entri_checkpoint(checkpoint_id, induk, current_lsn, time.time())
         # Fase 3: setiap checkpoint adalah sebuah commit pada rantai berparent.
         entri["commit_id"] = checkpoint_id
